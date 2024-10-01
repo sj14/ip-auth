@@ -51,7 +51,7 @@ func lookupEnvDuration(key string, defaultVal time.Duration) time.Duration {
 	if val, ok := os.LookupEnv(key); ok {
 		parsed, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
-			log.Fatalf("failed parsing %q as uint64 (%q): %v", val, key, err)
+			log.Fatalf("failed parsing %q as duration (%q): %v", val, key, err)
 		}
 		return time.Duration(parsed)
 	}
@@ -66,6 +66,7 @@ type Controller struct {
 	allowCIDRFix    []netip.Prefix
 	allowIPsDynamic []netip.Addr
 	denyPrivateIPs  bool
+	trustHeaders    bool
 	maxAttempts     int
 }
 
@@ -82,6 +83,7 @@ func main() {
 		allowCIDRFlag  = flag.String("allow-cidr", lookupEnvString("ALLOW_CIDR", ""), "allow the given CIDR (e.g. 10.0.0.0/8,192.168.0.0/16)")
 		denyCIDRFlag   = flag.String("deny-cidr", lookupEnvString("DENY_CIDR", ""), "block the given CIDR (e.g. 10.0.0.0/8,192.168.0.0/16)")
 		denyPrivateIPs = flag.Bool("deny-private", lookupEnvBool("DENY_PRIVATE", false), "deny IPs from the private network space")
+		trustHeaders   = flag.Bool("trust-headers", lookupEnvBool("TRUST_HEADERS", false), "trust X-Real-Ip and X-Forwarded-For headers")
 		resetInterval  = flag.Duration("reset-interval", lookupEnvDuration("RESET_INTERVAL", 7*24*time.Hour), "Cleanup dynamic IPs and renew host IPs")
 	)
 	flag.Parse()
@@ -92,6 +94,7 @@ func main() {
 		maxAttempts:    *maxAttempts,
 		bannedIPs:      make(map[netip.Addr]uint),
 		denyPrivateIPs: *denyPrivateIPs,
+		trustHeaders:   *trustHeaders,
 	}
 
 	allowedUsers := strings.Split(*usersFlag, ",")
@@ -266,16 +269,15 @@ func (c *Controller) HandleIPWrapper(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func ReadUserIP(r *http.Request) string {
-	// IPAddress := r.Header.Get("X-Real-Ip")
-	// if IPAddress == "" {
-	// 	IPAddress = r.Header.Get("X-Forwarded-For")
-	// }
-	// if IPAddress == "" {
-	// 	IPAddress = r.RemoteAddr
-	// }
-	// return IPAddress
-
+func (c *Controller) ReadUserIP(r *http.Request) string {
+	if c.trustHeaders {
+		if ip := r.Header.Get("X-Real-Ip"); ip != "" {
+			return ip
+		}
+		if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
+			return ip
+		}
+	}
 	return r.RemoteAddr
 }
 
@@ -289,7 +291,7 @@ func (c *Controller) HandleIP(w http.ResponseWriter, r *http.Request) (err error
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 	}()
 
-	addr, _, err := net.SplitHostPort(ReadUserIP(r))
+	addr, _, err := net.SplitHostPort(c.ReadUserIP(r))
 	if err != nil {
 		return fmt.Errorf("split host port: %w", err)
 	}

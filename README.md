@@ -35,6 +35,8 @@ Add the container as a sidecar and point your endpoints to it.
         Cleanup dynamic IPs and renew host IPs (default 168h0m0s)
   -target string
         proxy to the given target
+  -trust-headers
+        trust X-Real-Ip and X-Forwarded-For headers
   -users string
         allow the given basic auth credentals (e.g. user1:pass1,user2:pass2)
   -verbosity int
