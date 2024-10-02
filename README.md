@@ -35,6 +35,16 @@ Add the container as a sidecar and point your endpoints to it.
         Cleanup dynamic IPs and renew host IPs (default 168h0m0s)
   -target string
         proxy to the given target
+  -tls-cert string
+        path to TLS cert file
+  -tls-key string
+        path to TLS key file
+  -tls-listen string
+        listen for IPv4/IPv6 TLS connections (default ":8180")
+  -tls-listen4 string
+        listen for IPv4 TLS connections (default ":8184")
+  -tls-listen6 string
+        listen for IPv6 TLS connections (default ":8186")
   -trust-headers
         trust X-Real-Ip and X-Forwarded-For headers
   -users string

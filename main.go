@@ -72,19 +72,24 @@ type Controller struct {
 
 func main() {
 	var (
-		listenAddrAny  = flag.String("listen", lookupEnvString("LISTEN", ":8080"), "listen for IPv4/IPv6 connections")
-		listenAddr4    = flag.String("listen4", lookupEnvString("LISTEN4", ":8084"), "listen for IPv4 connections")
-		listenAddr6    = flag.String("listen6", lookupEnvString("LISTEN6", ":8086"), "listen for IPv6 connections")
-		target         = flag.String("target", lookupEnvString("TARGET", ""), "proxy to the given target")
-		verbosity      = flag.Int("verbosity", lookupEnvInt("VERBOSITY", 0), "-4 Debug, 0 Info, 4 Warn, 8 Error")
-		maxAttempts    = flag.Int("max-attempts", lookupEnvInt("MAX_ATTEMPTS", 10), "ban IP after max failed auth attempts")
-		usersFlag      = flag.String("users", lookupEnvString("USERS", ""), "allow the given basic auth credentals (e.g. user1:pass1,user2:pass2)")
-		allowHostsFlag = flag.String("allow-hosts", lookupEnvString("ALLOW_HOSTS", ""), "allow the given host IPs (e.g. example.com)")
-		allowCIDRFlag  = flag.String("allow-cidr", lookupEnvString("ALLOW_CIDR", ""), "allow the given CIDR (e.g. 10.0.0.0/8,192.168.0.0/16)")
-		denyCIDRFlag   = flag.String("deny-cidr", lookupEnvString("DENY_CIDR", ""), "block the given CIDR (e.g. 10.0.0.0/8,192.168.0.0/16)")
-		denyPrivateIPs = flag.Bool("deny-private", lookupEnvBool("DENY_PRIVATE", false), "deny IPs from the private network space")
-		trustHeaders   = flag.Bool("trust-headers", lookupEnvBool("TRUST_HEADERS", false), "trust X-Real-Ip and X-Forwarded-For headers")
-		resetInterval  = flag.Duration("reset-interval", lookupEnvDuration("RESET_INTERVAL", 7*24*time.Hour), "Cleanup dynamic IPs and renew host IPs")
+		listenAddrAny    = flag.String("listen", lookupEnvString("LISTEN", ":8080"), "listen for IPv4/IPv6 connections")
+		listenAddr4      = flag.String("listen4", lookupEnvString("LISTEN4", ":8084"), "listen for IPv4 connections")
+		listenAddr6      = flag.String("listen6", lookupEnvString("LISTEN6", ":8086"), "listen for IPv6 connections")
+		tlsCert          = flag.String("tls-cert", lookupEnvString("TLS_CERT", ""), "path to TLS cert file")
+		tlsKey           = flag.String("tls-key", lookupEnvString("TLS_KEY", ""), "path to TLS key file")
+		listenAddrTLSAny = flag.String("tls-listen", lookupEnvString("TLS_LISTEN", ":8180"), "listen for IPv4/IPv6 TLS connections")
+		listenAddrTLS4   = flag.String("tls-listen4", lookupEnvString("TLS_LISTEN4", ":8184"), "listen for IPv4 TLS connections")
+		listenAddrTLS6   = flag.String("tls-listen6", lookupEnvString("TLS_LISTEN6", ":8186"), "listen for IPv6 TLS connections")
+		target           = flag.String("target", lookupEnvString("TARGET", ""), "proxy to the given target")
+		verbosity        = flag.Int("verbosity", lookupEnvInt("VERBOSITY", 0), "-4 Debug, 0 Info, 4 Warn, 8 Error")
+		maxAttempts      = flag.Int("max-attempts", lookupEnvInt("MAX_ATTEMPTS", 10), "ban IP after max failed auth attempts")
+		usersFlag        = flag.String("users", lookupEnvString("USERS", ""), "allow the given basic auth credentals (e.g. user1:pass1,user2:pass2)")
+		allowHostsFlag   = flag.String("allow-hosts", lookupEnvString("ALLOW_HOSTS", ""), "allow the given host IPs (e.g. example.com)")
+		allowCIDRFlag    = flag.String("allow-cidr", lookupEnvString("ALLOW_CIDR", ""), "allow the given CIDR (e.g. 10.0.0.0/8,192.168.0.0/16)")
+		denyCIDRFlag     = flag.String("deny-cidr", lookupEnvString("DENY_CIDR", ""), "block the given CIDR (e.g. 10.0.0.0/8,192.168.0.0/16)")
+		denyPrivateIPs   = flag.Bool("deny-private", lookupEnvBool("DENY_PRIVATE", false), "deny IPs from the private network space")
+		trustHeaders     = flag.Bool("trust-headers", lookupEnvBool("TRUST_HEADERS", false), "trust X-Real-Ip and X-Forwarded-For headers")
+		resetInterval    = flag.Duration("reset-interval", lookupEnvDuration("RESET_INTERVAL", 7*24*time.Hour), "Cleanup dynamic IPs and renew host IPs")
 	)
 	flag.Parse()
 
@@ -135,46 +140,113 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", c.ProxyRequestHandler(proxy))
 
+	listen(
+		mux,
+		*listenAddr4,
+		*listenAddr6,
+		*listenAddrAny,
+	)
+
+	listenTLS(
+		mux,
+		*tlsCert,
+		*tlsKey,
+		*listenAddrTLS4,
+		*listenAddrTLS6,
+		*listenAddrTLSAny,
+	)
+
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	wg.Wait()
+}
+
+func listen(mux http.Handler, addrV4, addrV6, addrAny string) {
 	go func() {
-		if *listenAddr4 == "" {
+		if addrV4 == "" {
 			return
 		}
-		listenIPv4, err := net.Listen("tcp4", *listenAddr4)
+		listen, err := net.Listen("tcp4", addrV4)
 		if err != nil {
 			log.Fatalf("failed to listen IPv4 server: %v\n", err)
 		}
 
-		slog.Info("listen IPv4", "addr", *listenAddr4)
-		err = http.Serve(listenIPv4, mux)
+		slog.Info("listen IPv4", "addr", addrV4)
+		err = http.Serve(listen, mux)
 		if err != nil {
 			log.Fatalf("failed to serve IPv4 server: %v\n", err)
 		}
 	}()
 
 	go func() {
-		if *listenAddr6 == "" {
+		if addrV6 == "" {
 			return
 		}
-		listenIPv6, err := net.Listen("tcp6", *listenAddr6)
+		listen, err := net.Listen("tcp6", addrV6)
 		if err != nil {
 			log.Fatalf("failed to listen IPv6 server: %v\n", err)
 		}
 
-		slog.Info("listen IPv6", "addr", *listenAddr6)
-		err = http.Serve(listenIPv6, mux)
+		slog.Info("listen IPv6", "addr", addrV6)
+		err = http.Serve(listen, mux)
 		if err != nil {
 			log.Fatalf("failed to serve IPv6 server: %v\n", err)
 		}
 	}()
 
 	go func() {
-		slog.Info("listen IPv4/IPv6", "addr", *listenAddrAny)
-		log.Fatal(http.ListenAndServe(*listenAddrAny, mux))
+		if addrAny == "" {
+			return
+		}
+		slog.Info("listen IPv4/IPv6", "addr", addrAny)
+		log.Fatal(http.ListenAndServe(addrAny, mux))
+	}()
+}
+
+func listenTLS(mux http.Handler, cert, key, addrV4, addrV6, addrAny string) {
+	if cert == "" || key == "" {
+		return
+	}
+
+	go func() {
+		if addrV4 == "" {
+			return
+		}
+		listen, err := net.Listen("tcp4", addrV4)
+		if err != nil {
+			log.Fatalf("failed to listen IPv4 TLS server: %v\n", err)
+		}
+
+		slog.Info("listen IPv4 TLS", "addr", addrV4)
+		err = http.ServeTLS(listen, mux, cert, key)
+		if err != nil {
+			log.Fatalf("failed to serve IPv4 TLS server: %v\n", err)
+		}
 	}()
 
-	wg := sync.WaitGroup{}
-	wg.Add(1)
-	wg.Wait()
+	go func() {
+		if addrV6 == "" {
+			return
+		}
+		listen, err := net.Listen("tcp6", addrV6)
+		if err != nil {
+			log.Fatalf("failed to listen IPv6 TLS server: %v\n", err)
+		}
+
+		slog.Info("listen IPv6 TLS", "addr", addrV6)
+		err = http.ServeTLS(listen, mux, cert, key)
+		if err != nil {
+			log.Fatalf("failed to serve IPv6 TLS server: %v\n", err)
+		}
+	}()
+
+	go func() {
+		if addrAny == "" {
+			return
+		}
+		slog.Info("listen IPv4/IPv6 TLS", "addr", addrAny)
+		log.Fatal(http.ListenAndServeTLS(addrAny, cert, key, mux))
+	}()
 }
 
 // Will recheck IPs from hosts and cleanup all dynamic IPs added by basic auth.
