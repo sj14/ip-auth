@@ -344,9 +344,11 @@ func (c *Controller) HandleIPWrapper(w http.ResponseWriter, r *http.Request) {
 func (c *Controller) ReadUserIP(r *http.Request) (string, error) {
 	if c.trustHeaders {
 		if ip := r.Header.Get("X-Real-Ip"); ip != "" {
+			slog.Debug("IP from X-Real-Ip", "addr", ip)
 			return ip, nil
 		}
 		if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
+			slog.Debug("IP from X-Forwarded-For", "addr", ip)
 			return ip, nil
 		}
 	}
@@ -356,6 +358,7 @@ func (c *Controller) ReadUserIP(r *http.Request) (string, error) {
 		return "", fmt.Errorf("split host port: %w", err)
 	}
 
+	slog.Debug("IP from request", "addr", addr)
 	return addr, nil
 }
 
@@ -375,7 +378,6 @@ func (c *Controller) HandleIP(w http.ResponseWriter, r *http.Request) (err error
 	}
 
 	requestIP := netip.MustParseAddr(addr)
-	slog.Debug("request", "addr", requestIP)
 
 	if c.denyPrivateIPs {
 		if requestIP.IsPrivate() || requestIP.IsLoopback() || requestIP.IsLinkLocalUnicast() || requestIP.IsLinkLocalMulticast() {
