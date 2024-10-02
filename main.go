@@ -341,16 +341,22 @@ func (c *Controller) HandleIPWrapper(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (c *Controller) ReadUserIP(r *http.Request) string {
+func (c *Controller) ReadUserIP(r *http.Request) (string, error) {
 	if c.trustHeaders {
 		if ip := r.Header.Get("X-Real-Ip"); ip != "" {
-			return ip
+			return ip, nil
 		}
 		if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
-			return ip
+			return ip, nil
 		}
 	}
-	return r.RemoteAddr
+
+	addr, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return "", fmt.Errorf("split host port: %w", err)
+	}
+
+	return addr, nil
 }
 
 func (c *Controller) HandleIP(w http.ResponseWriter, r *http.Request) (err error) {
@@ -363,9 +369,9 @@ func (c *Controller) HandleIP(w http.ResponseWriter, r *http.Request) (err error
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 	}()
 
-	addr, _, err := net.SplitHostPort(c.ReadUserIP(r))
+	addr, err := c.ReadUserIP(r)
 	if err != nil {
-		return fmt.Errorf("split host port: %w", err)
+		return err
 	}
 
 	requestIP := netip.MustParseAddr(addr)
