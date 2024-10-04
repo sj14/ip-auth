@@ -72,6 +72,7 @@ type Controller struct {
 
 func main() {
 	var (
+		statusPath       = flag.String("status-path", lookupEnvString("STATUS_PATH", "/basic-ip-auth"), "show info for the requesting IP")
 		listenAddrAny    = flag.String("listen", lookupEnvString("LISTEN", ":8080"), "listen for IPv4/IPv6 connections")
 		listenAddr4      = flag.String("listen4", lookupEnvString("LISTEN4", ":8084"), "listen for IPv4 connections")
 		listenAddr6      = flag.String("listen6", lookupEnvString("LISTEN6", ":8086"), "listen for IPv6 connections")
@@ -104,6 +105,9 @@ func main() {
 
 	allowedUsers := strings.Split(*usersFlag, ",")
 	for _, user := range allowedUsers {
+		if user == "" {
+			continue
+		}
 		namePass := strings.Split(user, ":")
 		if len(namePass) != 2 {
 			slog.Error("malformed user", "user", namePass)
@@ -139,6 +143,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", c.ProxyRequestHandler(proxy))
+	mux.HandleFunc(*statusPath, c.Status)
 
 	listen(
 		mux,
@@ -316,12 +321,12 @@ func (c *Controller) BasicAuth(requestIP netip.Addr, w http.ResponseWriter, r *h
 	givenUser, givenPass, _ := r.BasicAuth()
 
 	if len(c.allowedUsers) == 0 {
-		return fmt.Errorf("basic auth disable (no users specified)")
+		return fmt.Errorf("basic auth disabled (no users specified)")
 	}
 
 	for _, user := range c.allowedUsers {
 		if givenUser == user.Name && givenPass == user.Password {
-			slog.Info("success basic auth (address dynamically added)", "user", user.Name)
+			slog.Info("success basic auth (address dynamically added)", "addr", requestIP.String(), "user", user.Name)
 			return nil
 		}
 	}
@@ -341,25 +346,26 @@ func (c *Controller) HandleIPWrapper(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (c *Controller) ReadUserIP(r *http.Request) (string, error) {
+func (c *Controller) ReadUserIP(r *http.Request) (netip.Addr, error) {
 	if c.trustHeaders {
 		if ip := r.Header.Get("X-Real-Ip"); ip != "" {
 			slog.Debug("IP from X-Real-Ip", "addr", ip)
-			return ip, nil
+			return netip.ParseAddr(ip)
 		}
 		if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
 			slog.Debug("IP from X-Forwarded-For", "addr", ip)
-			return ip, nil
+			return netip.ParseAddr(ip)
 		}
 	}
 
 	addr, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return "", fmt.Errorf("split host port: %w", err)
+		return netip.Addr{}, fmt.Errorf("split host port: %w", err)
 	}
 
 	slog.Debug("IP from request", "addr", addr)
-	return addr, nil
+
+	return netip.ParseAddr(addr)
 }
 
 func (c *Controller) HandleIP(w http.ResponseWriter, r *http.Request) (err error) {
@@ -372,12 +378,10 @@ func (c *Controller) HandleIP(w http.ResponseWriter, r *http.Request) (err error
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 	}()
 
-	addr, err := c.ReadUserIP(r)
+	requestIP, err := c.ReadUserIP(r)
 	if err != nil {
 		return err
 	}
-
-	requestIP := netip.MustParseAddr(addr)
 
 	if c.denyPrivateIPs {
 		if requestIP.IsPrivate() || requestIP.IsLoopback() || requestIP.IsLinkLocalUnicast() || requestIP.IsLinkLocalMulticast() {
@@ -410,9 +414,9 @@ func (c *Controller) HandleIP(w http.ResponseWriter, r *http.Request) (err error
 		return err
 	}
 
-	slog.Debug("allowed", "addr", addr)
+	slog.Debug("allowed", "addr", requestIP)
 	c.mutex.Lock()
-	c.allowIPsDynamic = append(c.allowIPsDynamic, netip.MustParseAddr(addr))
+	c.allowIPsDynamic = append(c.allowIPsDynamic, requestIP)
 	c.mutex.Unlock()
 	return nil
 }
@@ -427,4 +431,44 @@ func (c *Controller) ProxyRequestHandler(proxy *httputil.ReverseProxy) func(http
 
 		proxy.ServeHTTP(w, r)
 	}
+}
+
+func (c *Controller) Status(w http.ResponseWriter, r *http.Request) {
+	requestIP, err := c.ReadUserIP(r)
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
+	status := "denied"
+
+	if requestIP.IsPrivate() && c.denyPrivateIPs {
+		status = fmt.Sprintf("denied (private IP)")
+	}
+
+	for ip, attempts := range c.bannedIPs {
+		if ip == requestIP && attempts >= uint(c.maxAttempts) {
+			status = fmt.Sprintf("banned")
+			break
+		}
+	}
+
+	for _, cidr := range c.denyCIDR {
+		if cidr.Contains(requestIP) {
+			status = fmt.Sprintf("denied CIDR (%s)", cidr.String())
+			break
+		}
+	}
+	for _, cidr := range c.allowCIDRFix {
+		if cidr.Contains(requestIP) {
+			status = fmt.Sprintf("allowed CIDR (%s)", cidr.String())
+			break
+		}
+	}
+	if slices.Contains(c.allowIPsDynamic, requestIP) {
+		status = fmt.Sprintf("allowed dynamic IP")
+	}
+
+	w.Write([]byte(fmt.Sprintf("ip: %s\n", requestIP)))
+	w.Write([]byte(fmt.Sprintf("status: %s\n", status)))
 }

@@ -33,6 +33,8 @@ Add the container as a sidecar and point your endpoints to it.
         ban IP after max failed auth attempts (default 10)
   -reset-interval duration
         Cleanup dynamic IPs and renew host IPs (default 168h0m0s)
+  -status-path string
+        show info for the requesting IP (default "/basic-ip-auth")
   -target string
         proxy to the given target
   -tls-cert string
