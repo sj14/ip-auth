@@ -68,6 +68,9 @@ type Controller struct {
 	denyPrivateIPs  bool
 	trustHeaders    bool
 	maxAttempts     int
+	mux             *http.ServeMux
+	tlsCert         string
+	tlsKey          string
 }
 
 func main() {
@@ -101,6 +104,8 @@ func main() {
 		bannedIPs:      make(map[netip.Addr]uint),
 		denyPrivateIPs: *denyPrivateIPs,
 		trustHeaders:   *trustHeaders,
+		tlsCert:        *tlsCert,
+		tlsKey:         *tlsKey,
 	}
 
 	allowedUsers := strings.Split(*usersFlag, ",")
@@ -145,112 +150,55 @@ func main() {
 	mux.HandleFunc("/", c.ProxyRequestHandler(proxy))
 	mux.HandleFunc(*statusPath, c.Status)
 
-	listen(
-		mux,
-		*listenAddr4,
-		*listenAddr6,
-		*listenAddrAny,
-	)
+	c.mux = mux
 
-	listenTLS(
-		mux,
-		*tlsCert,
-		*tlsKey,
-		*listenAddrTLS4,
-		*listenAddrTLS6,
-		*listenAddrTLSAny,
-	)
+	for _, addr := range []string{*listenAddr4, *listenAddr6, *listenAddrAny} {
+		if addr == "" {
+			continue
+		}
+
+		c.listen(false, addr, "tcp4")
+	}
+
+	for _, addr := range []string{*listenAddrTLS4, *listenAddrTLS6, *listenAddrTLSAny} {
+		if addr == "" {
+			continue
+		}
+		if c.tlsCert == "" || c.tlsKey == "" {
+			continue
+		}
+
+		c.listen(true, addr, "tcp6")
+	}
 
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 	wg.Wait()
 }
 
-func listen(mux http.Handler, addrV4, addrV6, addrAny string) {
-	go func() {
-		if addrV4 == "" {
-			return
-		}
-		listen, err := net.Listen("tcp4", addrV4)
-		if err != nil {
-			log.Fatalf("failed to listen IPv4 server: %v\n", err)
-		}
+func (c *Controller) listen(tls bool, addr, network string) {
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: c.mux,
+	}
 
-		slog.Info("listen IPv4", "addr", addrV4)
-		err = http.Serve(listen, mux)
-		if err != nil {
-			log.Fatalf("failed to serve IPv4 server: %v\n", err)
-		}
-	}()
-
-	go func() {
-		if addrV6 == "" {
-			return
-		}
-		listen, err := net.Listen("tcp6", addrV6)
-		if err != nil {
-			log.Fatalf("failed to listen IPv6 server: %v\n", err)
-		}
-
-		slog.Info("listen IPv6", "addr", addrV6)
-		err = http.Serve(listen, mux)
-		if err != nil {
-			log.Fatalf("failed to serve IPv6 server: %v\n", err)
-		}
-	}()
-
-	go func() {
-		if addrAny == "" {
-			return
-		}
-		slog.Info("listen IPv4/IPv6", "addr", addrAny)
-		log.Fatal(http.ListenAndServe(addrAny, mux))
-	}()
-}
-
-func listenTLS(mux http.Handler, cert, key, addrV4, addrV6, addrAny string) {
-	if cert == "" || key == "" {
-		return
+	listen, err := net.Listen(network, addr)
+	if err != nil {
+		log.Fatalln(err)
 	}
 
 	go func() {
-		if addrV4 == "" {
-			return
-		}
-		listen, err := net.Listen("tcp4", addrV4)
-		if err != nil {
-			log.Fatalf("failed to listen IPv4 TLS server: %v\n", err)
-		}
+		slog.Info("listening", "addr", addr, "network", network, "tls", tls)
 
-		slog.Info("listen IPv4 TLS", "addr", addrV4)
-		err = http.ServeTLS(listen, mux, cert, key)
-		if err != nil {
-			log.Fatalf("failed to serve IPv4 TLS server: %v\n", err)
+		if tls {
+			if err := srv.ServeTLS(listen, c.tlsCert, c.tlsKey); err != nil {
+				log.Fatalln(err)
+			}
+		} else {
+			if err := srv.Serve(listen); err != nil {
+				log.Fatalln(err)
+			}
 		}
-	}()
-
-	go func() {
-		if addrV6 == "" {
-			return
-		}
-		listen, err := net.Listen("tcp6", addrV6)
-		if err != nil {
-			log.Fatalf("failed to listen IPv6 TLS server: %v\n", err)
-		}
-
-		slog.Info("listen IPv6 TLS", "addr", addrV6)
-		err = http.ServeTLS(listen, mux, cert, key)
-		if err != nil {
-			log.Fatalf("failed to serve IPv6 TLS server: %v\n", err)
-		}
-	}()
-
-	go func() {
-		if addrAny == "" {
-			return
-		}
-		slog.Info("listen IPv4/IPv6 TLS", "addr", addrAny)
-		log.Fatal(http.ListenAndServeTLS(addrAny, cert, key, mux))
 	}()
 }
 
