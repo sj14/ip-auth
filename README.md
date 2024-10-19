@@ -23,32 +23,20 @@ Add the container as a sidecar and point your endpoints to it.
         block the given CIDR (e.g. 10.0.0.0/8,192.168.0.0/16)
   -deny-private
         deny IPs from the private network space
+  -ip-header string
+        e.g. 'X-Real-Ip' or 'X-Forwarded-For' when you want to extract the IP from the given header
   -listen string
-        listen for IPv4/IPv6 connections (default ":8080")
-  -listen4 string
-        listen for IPv4 connections (default ":8084")
-  -listen6 string
-        listen for IPv6 connections (default ":8086")
+        listen for connections (default ":8080")
   -max-attempts int
         ban IP after max failed auth attempts (default 10)
+  -network string
+        tcp, tcp4, tcp6, unix, unixpacket (default "tcp")
   -reset-interval duration
         Cleanup dynamic IPs and renew host IPs (default 168h0m0s)
   -status-path string
         show info for the requesting IP (default "/basic-ip-auth")
   -target string
         proxy to the given target
-  -tls-cert string
-        path to TLS cert file
-  -tls-key string
-        path to TLS key file
-  -tls-listen string
-        listen for IPv4/IPv6 TLS connections (default ":8180")
-  -tls-listen4 string
-        listen for IPv4 TLS connections (default ":8184")
-  -tls-listen6 string
-        listen for IPv6 TLS connections (default ":8186")
-  -trust-headers
-        trust X-Real-Ip and X-Forwarded-For headers
   -users string
         allow the given basic auth credentals (e.g. user1:pass1,user2:pass2)
   -verbosity int

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -11,11 +12,15 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"os/signal"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 )
 
 func lookupEnvString(key string, defaultVal string) string {
@@ -66,46 +71,36 @@ type Controller struct {
 	allowCIDRFix    []netip.Prefix
 	allowIPsDynamic []netip.Addr
 	denyPrivateIPs  bool
-	trustHeaders    bool
+	trustedIPHeader string
 	maxAttempts     int
 	mux             *http.ServeMux
-	tlsCert         string
-	tlsKey          string
 }
 
 func main() {
 	var (
-		statusPath       = flag.String("status-path", lookupEnvString("STATUS_PATH", "/basic-ip-auth"), "show info for the requesting IP")
-		listenAddrAny    = flag.String("listen", lookupEnvString("LISTEN", ":8080"), "listen for IPv4/IPv6 connections")
-		listenAddr4      = flag.String("listen4", lookupEnvString("LISTEN4", ":8084"), "listen for IPv4 connections")
-		listenAddr6      = flag.String("listen6", lookupEnvString("LISTEN6", ":8086"), "listen for IPv6 connections")
-		tlsCert          = flag.String("tls-cert", lookupEnvString("TLS_CERT", ""), "path to TLS cert file")
-		tlsKey           = flag.String("tls-key", lookupEnvString("TLS_KEY", ""), "path to TLS key file")
-		listenAddrTLSAny = flag.String("tls-listen", lookupEnvString("TLS_LISTEN", ":8180"), "listen for IPv4/IPv6 TLS connections")
-		listenAddrTLS4   = flag.String("tls-listen4", lookupEnvString("TLS_LISTEN4", ":8184"), "listen for IPv4 TLS connections")
-		listenAddrTLS6   = flag.String("tls-listen6", lookupEnvString("TLS_LISTEN6", ":8186"), "listen for IPv6 TLS connections")
-		target           = flag.String("target", lookupEnvString("TARGET", ""), "proxy to the given target")
-		verbosity        = flag.Int("verbosity", lookupEnvInt("VERBOSITY", 0), "-4 Debug, 0 Info, 4 Warn, 8 Error")
-		maxAttempts      = flag.Int("max-attempts", lookupEnvInt("MAX_ATTEMPTS", 10), "ban IP after max failed auth attempts")
-		usersFlag        = flag.String("users", lookupEnvString("USERS", ""), "allow the given basic auth credentals (e.g. user1:pass1,user2:pass2)")
-		allowHostsFlag   = flag.String("allow-hosts", lookupEnvString("ALLOW_HOSTS", ""), "allow the given host IPs (e.g. example.com)")
-		allowCIDRFlag    = flag.String("allow-cidr", lookupEnvString("ALLOW_CIDR", ""), "allow the given CIDR (e.g. 10.0.0.0/8,192.168.0.0/16)")
-		denyCIDRFlag     = flag.String("deny-cidr", lookupEnvString("DENY_CIDR", ""), "block the given CIDR (e.g. 10.0.0.0/8,192.168.0.0/16)")
-		denyPrivateIPs   = flag.Bool("deny-private", lookupEnvBool("DENY_PRIVATE", false), "deny IPs from the private network space")
-		trustHeaders     = flag.Bool("trust-headers", lookupEnvBool("TRUST_HEADERS", false), "trust X-Real-Ip and X-Forwarded-For headers")
-		resetInterval    = flag.Duration("reset-interval", lookupEnvDuration("RESET_INTERVAL", 7*24*time.Hour), "Cleanup dynamic IPs and renew host IPs")
+		statusPath      = flag.String("status-path", lookupEnvString("STATUS_PATH", "/basic-ip-auth"), "show info for the requesting IP")
+		listen          = flag.String("listen", lookupEnvString("LISTEN", ":8080"), "listen for connections")
+		network         = flag.String("network", lookupEnvString("NETWORK", "tcp"), "tcp, tcp4, tcp6, unix, unixpacket")
+		target          = flag.String("target", lookupEnvString("TARGET", ""), "proxy to the given target")
+		verbosity       = flag.Int("verbosity", lookupEnvInt("VERBOSITY", 0), "-4 Debug, 0 Info, 4 Warn, 8 Error")
+		maxAttempts     = flag.Int("max-attempts", lookupEnvInt("MAX_ATTEMPTS", 10), "ban IP after max failed auth attempts")
+		usersFlag       = flag.String("users", lookupEnvString("USERS", ""), "allow the given basic auth credentals (e.g. user1:pass1,user2:pass2)")
+		allowHostsFlag  = flag.String("allow-hosts", lookupEnvString("ALLOW_HOSTS", ""), "allow the given host IPs (e.g. example.com)")
+		allowCIDRFlag   = flag.String("allow-cidr", lookupEnvString("ALLOW_CIDR", ""), "allow the given CIDR (e.g. 10.0.0.0/8,192.168.0.0/16)")
+		denyCIDRFlag    = flag.String("deny-cidr", lookupEnvString("DENY_CIDR", ""), "block the given CIDR (e.g. 10.0.0.0/8,192.168.0.0/16)")
+		denyPrivateIPs  = flag.Bool("deny-private", lookupEnvBool("DENY_PRIVATE", false), "deny IPs from the private network space")
+		trustedIPHeader = flag.String("ip-header", lookupEnvString("IP_HEADER", ""), "e.g. 'X-Real-Ip' or 'X-Forwarded-For' when you want to extract the IP from the given header")
+		resetInterval   = flag.Duration("reset-interval", lookupEnvDuration("RESET_INTERVAL", 7*24*time.Hour), "Cleanup dynamic IPs and renew host IPs")
 	)
 	flag.Parse()
 
 	slog.SetLogLoggerLevel(slog.Level(*verbosity))
 
 	c := Controller{
-		maxAttempts:    *maxAttempts,
-		bannedIPs:      make(map[netip.Addr]uint),
-		denyPrivateIPs: *denyPrivateIPs,
-		trustHeaders:   *trustHeaders,
-		tlsCert:        *tlsCert,
-		tlsKey:         *tlsKey,
+		maxAttempts:     *maxAttempts,
+		bannedIPs:       make(map[netip.Addr]uint),
+		denyPrivateIPs:  *denyPrivateIPs,
+		trustedIPHeader: *trustedIPHeader,
 	}
 
 	allowedUsers := strings.Split(*usersFlag, ",")
@@ -152,31 +147,12 @@ func main() {
 
 	c.mux = mux
 
-	for _, addr := range []string{*listenAddr4, *listenAddr6, *listenAddrAny} {
-		if addr == "" {
-			continue
-		}
+	c.listen(*listen, *network)
 
-		c.listen(false, addr, "tcp4")
-	}
-
-	for _, addr := range []string{*listenAddrTLS4, *listenAddrTLS6, *listenAddrTLSAny} {
-		if addr == "" {
-			continue
-		}
-		if c.tlsCert == "" || c.tlsKey == "" {
-			continue
-		}
-
-		c.listen(true, addr, "tcp6")
-	}
-
-	wg := sync.WaitGroup{}
-	wg.Add(1)
-	wg.Wait()
+	slog.Info("shut down")
 }
 
-func (c *Controller) listen(tls bool, addr, network string) {
+func (c *Controller) listen(addr, network string) {
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: c.mux,
@@ -187,19 +163,34 @@ func (c *Controller) listen(tls bool, addr, network string) {
 		log.Fatalln(err)
 	}
 
-	go func() {
-		slog.Info("listening", "addr", addr, "network", network, "tls", tls)
+	ctx, cancel := context.WithCancel(context.Background())
 
-		if tls {
-			if err := srv.ServeTLS(listen, c.tlsCert, c.tlsKey); err != nil {
-				log.Fatalln(err)
-			}
-		} else {
-			if err := srv.Serve(listen); err != nil {
-				log.Fatalln(err)
-			}
-		}
+	go func() {
+		c := make(chan os.Signal, 1) // we need to reserve to buffer size 1, so the notifier are not blocked
+		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+
+		<-c
+		cancel()
 	}()
+
+	g, ctx := errgroup.WithContext(ctx)
+
+	g.Go(func() error {
+		slog.Info("listening", "addr", addr, "network", network)
+		return srv.Serve(listen)
+	})
+
+	g.Go(func() error {
+		<-ctx.Done()
+		slog.Info("shutting down")
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		return srv.Shutdown(ctx)
+	})
+
+	if err := g.Wait(); err != nil {
+		fmt.Printf("exit reason: %s \n", err)
+	}
 }
 
 // Will recheck IPs from hosts and cleanup all dynamic IPs added by basic auth.
@@ -295,13 +286,9 @@ func (c *Controller) HandleIPWrapper(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Controller) ReadUserIP(r *http.Request) (netip.Addr, error) {
-	if c.trustHeaders {
-		if ip := r.Header.Get("X-Real-Ip"); ip != "" {
-			slog.Debug("IP from X-Real-Ip", "addr", ip)
-			return netip.ParseAddr(ip)
-		}
-		if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
-			slog.Debug("IP from X-Forwarded-For", "addr", ip)
+	if c.trustedIPHeader != "" {
+		if ip := r.Header.Get(c.trustedIPHeader); ip != "" {
+			slog.Debug("IP from header", "header", c.trustedIPHeader, "addr", ip)
 			return netip.ParseAddr(ip)
 		}
 	}
@@ -371,7 +358,6 @@ func (c *Controller) HandleIP(w http.ResponseWriter, r *http.Request) (err error
 
 func (c *Controller) ProxyRequestHandler(proxy *httputil.ReverseProxy) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-
 		err := c.HandleIP(w, r)
 		if err != nil {
 			return
