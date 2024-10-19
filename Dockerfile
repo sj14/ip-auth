@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1 as build
+FROM golang:1 AS build
 
 WORKDIR /go/src/app
 COPY main.go .

@@ -383,12 +383,12 @@ func (c *Controller) Status(w http.ResponseWriter, r *http.Request) {
 	status := "denied"
 
 	if requestIP.IsPrivate() && c.denyPrivateIPs {
-		status = fmt.Sprintf("denied (private IP)")
+		status = "denied (private IP)"
 	}
 
 	for ip, attempts := range c.bannedIPs {
 		if ip == requestIP && attempts >= uint(c.maxAttempts) {
-			status = fmt.Sprintf("banned")
+			status = "banned"
 			break
 		}
 	}
@@ -406,7 +406,7 @@ func (c *Controller) Status(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if slices.Contains(c.allowIPsDynamic, requestIP) {
-		status = fmt.Sprintf("allowed dynamic IP")
+		status = "allowed dynamic IP"
 	}
 
 	w.Write([]byte(fmt.Sprintf("ip: %s\n", requestIP)))
