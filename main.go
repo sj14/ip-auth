@@ -82,7 +82,7 @@ func main() {
 		listen          = flag.String("listen", lookupEnvString("LISTEN", ":8080"), "listen for connections")
 		network         = flag.String("network", lookupEnvString("NETWORK", "tcp"), "tcp, tcp4, tcp6, unix, unixpacket")
 		target          = flag.String("target", lookupEnvString("TARGET", ""), "proxy to the given target")
-		verbosity       = flag.Int("verbosity", lookupEnvInt("VERBOSITY", 0), "-4 Debug, 0 Info, 4 Warn, 8 Error")
+		verbosity       = flag.String("verbosity", lookupEnvString("VERBOSITY", "Info"), "one of 'Debug', 'Info', 'Warn', or 'Error'")
 		maxAttempts     = flag.Int("max-attempts", lookupEnvInt("MAX_ATTEMPTS", 10), "ban IP after max failed auth attempts")
 		usersFlag       = flag.String("users", lookupEnvString("USERS", ""), "allow the given basic auth credentals (e.g. user1:pass1,user2:pass2)")
 		allowHostsFlag  = flag.String("allow-hosts", lookupEnvString("ALLOW_HOSTS", ""), "allow the given host IPs (e.g. example.com)")
@@ -94,7 +94,13 @@ func main() {
 	)
 	flag.Parse()
 
-	slog.SetLogLoggerLevel(slog.Level(*verbosity))
+	var level slog.Level
+	err := level.UnmarshalText([]byte(*verbosity))
+	if err != nil {
+		log.Fatalf("failed parsing log level: %s\n", err)
+	}
+
+	slog.SetLogLoggerLevel(level)
 
 	c := Controller{
 		maxAttempts:     *maxAttempts,
@@ -166,7 +172,7 @@ func (c *Controller) listen(addr, network string) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go func() {
-		c := make(chan os.Signal, 1) // we need to reserve to buffer size 1, so the notifier are not blocked
+		c := make(chan os.Signal, 1)
 		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
 		<-c
@@ -189,7 +195,7 @@ func (c *Controller) listen(addr, network string) {
 	})
 
 	if err := g.Wait(); err != nil {
-		fmt.Printf("exit reason: %s \n", err)
+		slog.Info("exit", "reason", err)
 	}
 }
 

@@ -39,8 +39,8 @@ Add the container as a sidecar and point your endpoints to it.
         proxy to the given target
   -users string
         allow the given basic auth credentals (e.g. user1:pass1,user2:pass2)
-  -verbosity int
-        -4 Debug, 0 Info, 4 Warn, 8 Error
+  -verbosity string
+        one of 'Debug', 'Info', 'Warn', or 'Error' (default "Info")
 ```
 
 All options can also be set as environment variables by using their uppercase flag names and changing dashes (-) with underscores (_).
