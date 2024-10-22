@@ -54,11 +54,11 @@ func lookupEnvInt(key string, defaultVal int) int {
 
 func lookupEnvDuration(key string, defaultVal time.Duration) time.Duration {
 	if val, ok := os.LookupEnv(key); ok {
-		parsed, err := strconv.ParseInt(val, 10, 64)
+		duration, err := time.ParseDuration(val)
 		if err != nil {
 			log.Fatalf("failed parsing %q as duration (%q): %v", val, key, err)
 		}
-		return time.Duration(parsed)
+		return time.Duration(duration)
 	}
 	return defaultVal
 }
@@ -90,7 +90,7 @@ func main() {
 		denyCIDRFlag    = flag.String("deny-cidr", lookupEnvString("DENY_CIDR", ""), "block the given CIDR (e.g. 10.0.0.0/8,192.168.0.0/16)")
 		denyPrivateIPs  = flag.Bool("deny-private", lookupEnvBool("DENY_PRIVATE", false), "deny IPs from the private network space")
 		trustedIPHeader = flag.String("ip-header", lookupEnvString("IP_HEADER", ""), "e.g. 'X-Real-Ip' or 'X-Forwarded-For' when you want to extract the IP from the given header")
-		resetInterval   = flag.Duration("reset-interval", lookupEnvDuration("RESET_INTERVAL", 7*24*time.Hour), "Cleanup dynamic IPs and renew host IPs")
+		resetInterval   = flag.Duration("reset-interval", lookupEnvDuration("RESET_INTERVAL", 1*time.Hour), "Cleanup dynamic IPs and renew host IPs")
 	)
 	flag.Parse()
 
@@ -202,35 +202,42 @@ func (c *Controller) listen(addr, network string) {
 // Will recheck IPs from hosts and cleanup all dynamic IPs added by basic auth.
 func (c *Controller) generateDynamicIPs(resetInterval time.Duration, allowedHosts []string) {
 	for {
+		slog.Info("renewing dynamic IPs")
+
+		var newIPs []netip.Addr
 		for _, host := range allowedHosts {
-			c.allowHost(host)
+			hostIPs, err := c.hostToIP(host)
+			if err != nil {
+				slog.Error("hostToIP", "host", host, "error", err)
+				continue
+			}
+			newIPs = append(newIPs, hostIPs...)
 		}
 
-		time.Sleep(resetInterval)
-		slog.Info("renewing dynamic IPs")
 		c.mutex.Lock()
-		c.allowIPsDynamic = []netip.Addr{}
+		c.allowIPsDynamic = newIPs
 		c.mutex.Unlock()
+
+		time.Sleep(resetInterval)
 	}
 }
 
-func (c *Controller) allowHost(host string) {
+func (c *Controller) hostToIP(host string) ([]netip.Addr, error) {
 	ips, err := net.LookupIP(host)
 	if err != nil {
-		slog.Error("lookup ip", "host", host, "error", err)
-		return
+		return nil, err
 	}
 
+	var result []netip.Addr
 	for _, ip := range ips {
 		nip, ok := netip.AddrFromSlice(ip)
 		if !ok {
 			continue
 		}
-		c.mutex.Lock()
-		c.allowIPsDynamic = append(c.allowIPsDynamic, nip)
-		c.mutex.Unlock()
-		slog.Info("added ip from host", "host", host, "ip", nip.String())
+		result = append(result, nip)
 	}
+
+	return result, nil
 }
 
 func NewProxy(targetHost string) (*httputil.ReverseProxy, error) {
