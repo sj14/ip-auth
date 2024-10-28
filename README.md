@@ -1,13 +1,13 @@
-# Basic IP Auth
+# IP Auth
 
 There are circumstances where properly setup Basic Auth won't work [[1]](https://github.com/jellyfin/jellyfin-android/issues/123).
-Basic API Auth is a workaround by allowing specific IPs access to the service and proxying the traffic to the original service. Allowed IPs can be specified or dynamically added by passing a Basic Auth login once (from any device on the same IP). Everything is stored in memory and will be lost on restarts.
+IP Auth is a workaround by allowing specific IPs access to the service and proxying the traffic to the original service. Allowed IPs can be specified or dynamically added by passing a Basic Auth login once (from any device on the same IP). Everything is stored in memory and will be lost on restarts.
 
 ## Installation
 
 ```bash
-# do not use latest and specify a hash instead!
-docker pull ghcr.io/sj14/basic-ip-auth:latest
+# do not use the 'main' tag and specify a hash instead!
+docker pull ghcr.io/sj14/ip-auth:main
 ```
 
 Add the container as a sidecar and point your endpoints to it.
