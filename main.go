@@ -78,7 +78,7 @@ type Controller struct {
 
 func main() {
 	var (
-		statusPath      = flag.String("status-path", lookupEnvString("STATUS_PATH", "/basic-ip-auth"), "show info for the requesting IP")
+		statusPath      = flag.String("status-path", lookupEnvString("STATUS_PATH", "/ip-auth"), "show info for the requesting IP")
 		listen          = flag.String("listen", lookupEnvString("LISTEN", ":8080"), "listen for connections")
 		network         = flag.String("network", lookupEnvString("NETWORK", "tcp"), "tcp, tcp4, tcp6, unix, unixpacket")
 		target          = flag.String("target", lookupEnvString("TARGET", ""), "proxy to the given target")

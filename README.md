@@ -34,7 +34,7 @@ Add the container as a sidecar and point your endpoints to it.
   -reset-interval duration
     	Cleanup dynamic IPs and renew host IPs (default 1h0m0s)
   -status-path string
-    	show info for the requesting IP (default "/basic-ip-auth")
+    	show info for the requesting IP (default "/ip-auth")
   -target string
     	proxy to the given target
   -users string
