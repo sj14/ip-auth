@@ -324,6 +324,16 @@ func (c *Controller) BasicAuth(requestIP netip.Addr, w http.ResponseWriter, r *h
 	c.bannedIPs[requestIP] = banInfo
 	c.mutex.Unlock()
 
+	// login failed, add a tarpit
+	defer func() {
+		select {
+		case <-r.Context().Done():
+			slog.DebugContext(r.Context(), "tarpit: client closed connection")
+		case <-time.After(3 * time.Second):
+			slog.DebugContext(r.Context(), "tarpit: delayed by 3 seconds")
+		}
+	}()
+
 	return fmt.Errorf("failed basic auth (user=%s addr=%s attempts=%d)", givenUser, requestIP, banInfo.attempts)
 }
 
