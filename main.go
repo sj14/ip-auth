@@ -63,10 +63,15 @@ func lookupEnvDuration(key string, defaultVal time.Duration) time.Duration {
 	return defaultVal
 }
 
+type banInfo struct {
+	attempts uint
+	bannedAt time.Time
+}
+
 type Controller struct {
 	mutex           sync.Mutex // one to rule them all
 	allowedUsers    []User
-	bannedIPs       map[netip.Addr]uint
+	bannedIPs       map[netip.Addr]banInfo
 	denyCIDR        []netip.Prefix
 	allowCIDRFix    []netip.Prefix
 	allowIPsDynamic []netip.Addr
@@ -78,19 +83,20 @@ type Controller struct {
 
 func main() {
 	var (
-		statusPath      = flag.String("status-path", lookupEnvString("STATUS_PATH", "/ip-auth"), "show info for the requesting IP")
-		listen          = flag.String("listen", lookupEnvString("LISTEN", ":8080"), "listen for connections")
-		network         = flag.String("network", lookupEnvString("NETWORK", "tcp"), "tcp, tcp4, tcp6, unix, unixpacket")
-		target          = flag.String("target", lookupEnvString("TARGET", ""), "proxy to the given target")
-		verbosity       = flag.String("verbosity", lookupEnvString("VERBOSITY", "Info"), "one of 'Debug', 'Info', 'Warn', or 'Error'")
-		maxAttempts     = flag.Int("max-attempts", lookupEnvInt("MAX_ATTEMPTS", 10), "ban IP after max failed auth attempts")
-		usersFlag       = flag.String("users", lookupEnvString("USERS", ""), "allow the given basic auth credentals (e.g. user1:pass1,user2:pass2)")
-		allowHostsFlag  = flag.String("allow-hosts", lookupEnvString("ALLOW_HOSTS", ""), "allow the given host IPs (e.g. example.com)")
-		allowCIDRFlag   = flag.String("allow-cidr", lookupEnvString("ALLOW_CIDR", ""), "allow the given CIDR (e.g. 10.0.0.0/8,192.168.0.0/16)")
-		denyCIDRFlag    = flag.String("deny-cidr", lookupEnvString("DENY_CIDR", ""), "block the given CIDR (e.g. 10.0.0.0/8,192.168.0.0/16)")
-		denyPrivateIPs  = flag.Bool("deny-private", lookupEnvBool("DENY_PRIVATE", false), "deny IPs from the private network space")
-		trustedIPHeader = flag.String("ip-header", lookupEnvString("IP_HEADER", ""), "e.g. 'X-Real-Ip' or 'X-Forwarded-For' when you want to extract the IP from the given header")
-		resetInterval   = flag.Duration("reset-interval", lookupEnvDuration("RESET_INTERVAL", 1*time.Hour), "Cleanup dynamic IPs and renew host IPs")
+		statusPath        = flag.String("status-path", lookupEnvString("STATUS_PATH", "/ip-auth"), "show info for the requesting IP")
+		listen            = flag.String("listen", lookupEnvString("LISTEN", ":8080"), "listen for connections")
+		network           = flag.String("network", lookupEnvString("NETWORK", "tcp"), "tcp, tcp4, tcp6, unix, unixpacket")
+		target            = flag.String("target", lookupEnvString("TARGET", ""), "proxy to the given target")
+		verbosity         = flag.String("verbosity", lookupEnvString("VERBOSITY", "Info"), "one of 'Debug', 'Info', 'Warn', or 'Error'")
+		maxAttempts       = flag.Int("max-attempts", lookupEnvInt("MAX_ATTEMPTS", 10), "ban IP after max failed auth attempts (0 to disable)")
+		banDuration       = flag.Duration("ban-duration", lookupEnvDuration("BAN_DURATION", 1*time.Hour), "cleanup bans and failed login attempts (0 to disable)")
+		usersFlag         = flag.String("users", lookupEnvString("USERS", ""), "allow the given basic auth credentals (e.g. user1:pass1,user2:pass2)")
+		allowHostsFlag    = flag.String("allow-hosts", lookupEnvString("ALLOW_HOSTS", ""), "allow the given host IPs (e.g. example.com)")
+		allowCIDRFlag     = flag.String("allow-cidr", lookupEnvString("ALLOW_CIDR", ""), "allow the given CIDR (e.g. 10.0.0.0/8,192.168.0.0/16)")
+		denyCIDRFlag      = flag.String("deny-cidr", lookupEnvString("DENY_CIDR", ""), "block the given CIDR (e.g. 10.0.0.0/8,192.168.0.0/16)")
+		denyPrivateIPs    = flag.Bool("deny-private", lookupEnvBool("DENY_PRIVATE", false), "deny IPs from the private network space")
+		trustedIPHeader   = flag.String("ip-header", lookupEnvString("IP_HEADER", ""), "e.g. 'X-Real-Ip' or 'X-Forwarded-For' when you want to extract the IP from the given header")
+		ipCleanupInterval = flag.Duration("ip-cleanup", lookupEnvDuration("IP_CLEANUP", 1*time.Hour), "Cleanup dynamic IPs and renew host IPs")
 	)
 	flag.Parse()
 
@@ -104,7 +110,7 @@ func main() {
 
 	c := Controller{
 		maxAttempts:     *maxAttempts,
-		bannedIPs:       make(map[netip.Addr]uint),
+		bannedIPs:       make(map[netip.Addr]banInfo),
 		denyPrivateIPs:  *denyPrivateIPs,
 		trustedIPHeader: *trustedIPHeader,
 	}
@@ -139,7 +145,12 @@ func main() {
 	// Add dynamic IPs and renew frequently
 	allowedHosts := strings.Split(*allowHostsFlag, ",")
 	if len(allowedHosts) > 0 && allowedHosts[0] != "" {
-		go c.generateDynamicIPs(*resetInterval, allowedHosts)
+		go c.generateDynamicIPs(*ipCleanupInterval, allowedHosts)
+	}
+
+	// Cleanup bans
+	if *banDuration > 0 {
+		go c.cleanupFailedAttempts(*banDuration)
 	}
 
 	proxy, err := NewProxy(*target)
@@ -222,6 +233,27 @@ func (c *Controller) generateDynamicIPs(resetInterval time.Duration, allowedHost
 	}
 }
 
+// Cleanup bans and failed login attempts.
+func (c *Controller) cleanupFailedAttempts(banDuration time.Duration) {
+	for {
+		slog.Info("cleanup bans and failed logins")
+
+		remainingBans := make(map[netip.Addr]banInfo)
+
+		c.mutex.Lock()
+		for ip, info := range c.bannedIPs {
+			if info.bannedAt.Add(banDuration).Before(time.Now()) {
+				// still banned
+				remainingBans[ip] = info
+			}
+		}
+		c.bannedIPs = remainingBans
+		c.mutex.Unlock()
+
+		time.Sleep(banDuration)
+	}
+}
+
 func (c *Controller) hostToIP(host string) ([]netip.Addr, error) {
 	ips, err := net.LookupIP(host)
 	if err != nil {
@@ -263,10 +295,10 @@ type User struct {
 
 func (c *Controller) BasicAuth(requestIP netip.Addr, w http.ResponseWriter, r *http.Request) error {
 	c.mutex.Lock()
-	attempts := c.bannedIPs[requestIP]
+	banInfo := c.bannedIPs[requestIP]
 	c.mutex.Unlock()
 
-	if attempts >= uint(c.maxAttempts) {
+	if c.maxAttempts > 0 && banInfo.attempts >= uint(c.maxAttempts) {
 		return fmt.Errorf("IP is banned (addr=%s)", requestIP.String())
 	}
 
@@ -284,11 +316,15 @@ func (c *Controller) BasicAuth(requestIP netip.Addr, w http.ResponseWriter, r *h
 	}
 
 	c.mutex.Lock()
-	attempts = c.bannedIPs[requestIP]
-	c.bannedIPs[requestIP] = attempts + 1
+	banInfo = c.bannedIPs[requestIP]
+	banInfo.attempts += 1
+	if banInfo.attempts == uint(c.maxAttempts) {
+		banInfo.bannedAt = time.Now()
+	}
+	c.bannedIPs[requestIP] = banInfo
 	c.mutex.Unlock()
 
-	return fmt.Errorf("failed basic auth (user=%s addr=%s attempts=%d)", givenUser, requestIP, attempts)
+	return fmt.Errorf("failed basic auth (user=%s addr=%s attempts=%d)", givenUser, requestIP, banInfo.attempts)
 }
 
 func (c *Controller) HandleIPWrapper(w http.ResponseWriter, r *http.Request) {
@@ -393,8 +429,8 @@ func (c *Controller) Status(w http.ResponseWriter, r *http.Request) {
 		status = "denied (private IP)"
 	}
 
-	for ip, attempts := range c.bannedIPs {
-		if ip == requestIP && attempts >= uint(c.maxAttempts) {
+	for ip, banInfo := range c.bannedIPs {
+		if ip == requestIP && banInfo.attempts >= uint(c.maxAttempts) {
 			status = "banned"
 			break
 		}
