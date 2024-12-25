@@ -21,12 +21,14 @@ Add the container as a sidecar and point your endpoints to it.
         allow the given host IPs (e.g. example.com)
   -ban-duration duration
         cleanup bans and failed login attempts (0 to disable) (default 1h0m0s)
+  -basic-auth-duration duration
+        Cleanup Basic Auth authentications (0 to disable) (default 1h0m0s)
   -deny-cidr string
         block the given CIDR (e.g. 10.0.0.0/8,192.168.0.0/16)
   -deny-private
         deny IPs from the private network space
-  -ip-cleanup duration
-        Cleanup dynamic IPs and renew host IPs (default 1h0m0s)
+  -host-ip-renewal duration
+        Renew host IPs (default 1h0m0s)
   -ip-header string
         e.g. 'X-Real-Ip' or 'X-Forwarded-For' when you want to extract the IP from the given header
   -listen string
