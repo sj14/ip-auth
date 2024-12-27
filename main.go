@@ -454,6 +454,7 @@ func (c *Controller) HandleIP(w http.ResponseWriter, r *http.Request) (err error
 	slog.Debug("allowed by Basic Auth", "addr", requestIP)
 	c.mutex.Lock()
 	c.allowIPsByBasicAuth = append(c.allowIPsByBasicAuth, basicAuthIP{ip: requestIP, allowedAt: time.Now()})
+	delete(c.bannedIPs, requestIP)
 	c.mutex.Unlock()
 	return nil
 }
