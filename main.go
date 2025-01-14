@@ -365,8 +365,8 @@ func (c *Controller) BasicAuth(requestIP netip.Addr, w http.ResponseWriter, r *h
 		select {
 		case <-r.Context().Done():
 			slog.DebugContext(r.Context(), "tarpit: client closed connection")
-		case <-time.After(3 * time.Second):
-			slog.DebugContext(r.Context(), "tarpit: delayed by 3 seconds")
+		case <-time.After(5 * time.Second):
+			slog.DebugContext(r.Context(), "tarpit: delayed by 5 seconds")
 		}
 	}()
 
