@@ -6,7 +6,7 @@ IP Auth is a workaround by allowing specific IPs access to the service and proxy
 ## Installation
 
 ```bash
-# do not use the 'main' tag and specify a hash instead!
+# do not use the 'main' tag and specify a tag or hash instead!
 docker pull ghcr.io/sj14/ip-auth:main
 ```
 
