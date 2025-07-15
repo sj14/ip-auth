@@ -103,7 +103,7 @@ func main() {
 		denyPrivateIPs              = flag.Bool("deny-private", lookupEnvBool("DENY_PRIVATE", false), "deny IPs from the private network space")
 		trustedIPHeader             = flag.String("ip-header", lookupEnvString("IP_HEADER", ""), "e.g. 'X-Real-Ip' or 'X-Forwarded-For' when you want to extract the IP from the given header")
 		cleanupHostIPsInterval      = flag.Duration("host-ip-renewal", lookupEnvDuration("HOST_IP_RENEWAL", 1*time.Hour), "Renew host IPs")
-		cleanupBasicAuthIPsInterval = flag.Duration("basic-auth-duration", lookupEnvDuration("BASIC_AUTH_DURATION", 1*time.Hour), "Cleanup Basic Auth authentications (0 to disable)")
+		cleanupBasicAuthIPsInterval = flag.Duration("basic-auth-duration", lookupEnvDuration("BASIC_AUTH_DURATION", 12*time.Hour), "Cleanup Basic Auth authentications (0 to disable)")
 	)
 	flag.Parse()
 
@@ -157,7 +157,12 @@ func main() {
 
 	// Cleanup expired Basic Auth IPs
 	if *cleanupBasicAuthIPsInterval > 0 {
-		go c.cleanupBasicAuthIPs(*cleanupBasicAuthIPsInterval)
+		go func() {
+			for {
+				time.Sleep(1 * time.Minute)
+				c.cleanupBasicAuthIPs(*cleanupBasicAuthIPsInterval)
+			}
+		}()
 	}
 
 	// Cleanup bans
@@ -245,27 +250,26 @@ func (c *Controller) generateAllowIPsByHost(resetInterval time.Duration, allowed
 	}
 }
 
-func (c *Controller) cleanupBasicAuthIPs(resetInterval time.Duration) {
-	for {
-		time.Sleep(5 * time.Minute)
+func (c *Controller) cleanupBasicAuthIPs(expireInterval time.Duration) {
+	slog.Info("cleanup allowed Basic Auth IPs", "expire interval", expireInterval.String())
 
-		slog.Info("cleanup allowed Basic Auth IPs", "expire interval", resetInterval.String())
+	var newIPs []basicAuthIP
 
-		var newIPs []basicAuthIP
-
-		c.mutex.Lock()
-		for _, ipInfo := range c.allowIPsByBasicAuth {
-			if ipInfo.allowedAt.Add(resetInterval).Before(time.Now()) {
-				// not yet expired
-				newIPs = append(newIPs, ipInfo)
-			} else {
-				slog.Debug("expired Basic Auth IP", "ip", ipInfo.ip.String())
-			}
+	c.mutex.Lock()
+	for _, ipInfo := range c.allowIPsByBasicAuth {
+		if ipInfo.allowedAt.Add(expireInterval).After(time.Now()) {
+			// not yet expired
+			newIPs = append(newIPs, ipInfo)
+		} else {
+			slog.Debug("expired Basic Auth IP",
+				"ip", ipInfo.ip.String(),
+				"allowed_at", ipInfo.allowedAt,
+			)
 		}
-
-		c.allowIPsByBasicAuth = newIPs
-		c.mutex.Unlock()
 	}
+
+	c.allowIPsByBasicAuth = newIPs
+	c.mutex.Unlock()
 }
 
 // Cleanup bans and failed login attempts.
@@ -279,7 +283,7 @@ func (c *Controller) cleanupFailedAttempts(banDuration time.Duration) {
 
 		c.mutex.Lock()
 		for ip, info := range c.bannedIPs {
-			if info.bannedAt.Add(banDuration).Before(time.Now()) {
+			if info.bannedAt.Add(banDuration).After(time.Now()) {
 				// still banned
 				remainingBans[ip] = info
 			}
