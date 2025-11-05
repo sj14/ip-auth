@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -322,6 +323,14 @@ func NewProxy(targetHost string) (*httputil.ReverseProxy, error) {
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(url)
 			r.Out.Host = r.In.Host // if desired
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			if errors.Is(err, context.Canceled) {
+				slog.DebugContext(r.Context(), "proxy: client canceled request", "url", r.URL.String())
+				return
+			}
+			slog.ErrorContext(r.Context(), "proxy error", "err", err)
+			http.Error(w, "proxy error", http.StatusBadGateway)
 		},
 	}
 
