@@ -252,7 +252,7 @@ func (c *Controller) generateAllowIPsByHost(resetInterval time.Duration, allowed
 }
 
 func (c *Controller) cleanupBasicAuthIPs(expireInterval time.Duration) {
-	slog.Info("cleanup allowed Basic Auth IPs", "expire interval", expireInterval.String())
+	slog.Debug("cleanup allowed Basic Auth IPs", "expire interval", expireInterval.String())
 
 	var newIPs []basicAuthIP
 
@@ -278,7 +278,7 @@ func (c *Controller) cleanupFailedAttempts(banDuration time.Duration) {
 	for {
 		time.Sleep(5 * time.Minute)
 
-		slog.Info("cleanup bans and failed logins")
+		slog.Debug("cleanup bans and failed logins")
 
 		remainingBans := make(map[netip.Addr]banInfo)
 
