@@ -240,6 +240,7 @@ func (c *Controller) generateAllowIPsByHost(resetInterval time.Duration, allowed
 				slog.Error("hostToIP", "host", host, "error", err)
 				continue
 			}
+			slog.Info("adding", "host", host, "IPs", hostIPs)
 			newIPs = append(newIPs, hostIPs...)
 		}
 
