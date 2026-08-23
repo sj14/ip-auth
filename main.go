@@ -104,7 +104,7 @@ func main() {
 		denyCIDRFlag                = flag.String("deny-cidr", lookupEnvString("DENY_CIDR", ""), "block the given CIDR (e.g. 10.0.0.0/8,192.168.0.0/16)")
 		denyPrivateIPs              = flag.Bool("deny-private", lookupEnvBool("DENY_PRIVATE", false), "deny IPs from the private network space")
 		trustedIPHeader             = flag.String("ip-header", lookupEnvString("IP_HEADER", ""), "e.g. 'X-Real-Ip' or 'X-Forwarded-For' when you want to extract the IP from the given header")
-		cleanupHostIPsInterval      = flag.Duration("host-ip-renewal", lookupEnvDuration("HOST_IP_RENEWAL", 1*time.Hour), "Renew host IPs")
+		cleanupHostIPsInterval      = flag.Duration("host-ip-renewal", lookupEnvDuration("HOST_IP_RENEWAL", 1*time.Hour), "Renew host IPs (0 to resolve once and disable renewal)")
 		cleanupBasicAuthIPsInterval = flag.Duration("basic-auth-duration", lookupEnvDuration("BASIC_AUTH_DURATION", 12*time.Hour), "Cleanup Basic Auth authentications (0 to disable)")
 	)
 	flag.Parse()
@@ -248,6 +248,11 @@ func (c *Controller) generateAllowIPsByHost(resetInterval time.Duration, allowed
 		c.mutex.Lock()
 		c.allowIPsByHost = newIPs
 		c.mutex.Unlock()
+
+		if resetInterval <= 0 {
+			// resolve once, renewal disabled
+			return
+		}
 
 		time.Sleep(resetInterval)
 	}

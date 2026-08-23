@@ -50,7 +50,7 @@ go install github.com/sj14/ip-auth@latest
   -deny-private
         deny IPs from the private network space
   -host-ip-renewal duration
-        Renew host IPs (default 1h0m0s)
+        Renew host IPs (0 to resolve once and disable renewal) (default 1h0m0s)
   -ip-header string
         e.g. 'X-Real-Ip' or 'X-Forwarded-For' when you want to extract the IP from the given header
   -listen string
