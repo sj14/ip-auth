@@ -297,6 +297,10 @@ func (c *Controller) cleanupFailedAttempts(banDuration time.Duration) {
 	}
 }
 
+func isPrivateAddr(ip netip.Addr) bool {
+	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
+}
+
 func (c *Controller) hostToIP(host string) ([]netip.Addr, error) {
 	ips, err := net.LookupIP(host)
 	if err != nil {
@@ -435,10 +439,8 @@ func (c *Controller) HandleIP(w http.ResponseWriter, r *http.Request) (err error
 		return err
 	}
 
-	if c.denyPrivateIPs {
-		if requestIP.IsPrivate() || requestIP.IsLoopback() || requestIP.IsLinkLocalUnicast() || requestIP.IsLinkLocalMulticast() {
-			return fmt.Errorf("private IPs are blocked (addr=%s)", requestIP.String())
-		}
+	if c.denyPrivateIPs && isPrivateAddr(requestIP) {
+		return fmt.Errorf("private IPs are blocked (addr=%s)", requestIP.String())
 	}
 
 	for _, cidr := range c.denyCIDR {
@@ -508,7 +510,7 @@ func (c *Controller) Status(w http.ResponseWriter, r *http.Request) {
 
 	status := "denied"
 
-	if requestIP.IsPrivate() && c.denyPrivateIPs {
+	if c.denyPrivateIPs && isPrivateAddr(requestIP) {
 		status = "denied (private IP)"
 	}
 
