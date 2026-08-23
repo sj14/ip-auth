@@ -42,11 +42,11 @@ func lookupEnvBool(key string, defaultVal bool) bool {
 	return defaultVal
 }
 
-func lookupEnvInt(key string, defaultVal int) int {
+func lookupEnvUint(key string, defaultVal uint64) uint64 {
 	if val, ok := os.LookupEnv(key); ok {
-		parsed, err := strconv.Atoi(val)
+		parsed, err := strconv.ParseUint(val, 10, 64)
 		if err != nil {
-			log.Fatalf("failed parsing %q as int (%q): %v", val, key, err)
+			log.Fatalf("failed parsing %q as uint (%q): %v", val, key, err)
 		}
 		return parsed
 	}
@@ -65,7 +65,7 @@ func lookupEnvDuration(key string, defaultVal time.Duration) time.Duration {
 }
 
 type banInfo struct {
-	attempts uint
+	attempts uint64
 	bannedAt time.Time
 }
 
@@ -84,7 +84,7 @@ type Controller struct {
 	allowIPsByBasicAuth []basicAuthIP
 	denyPrivateIPs      bool
 	trustedIPHeader     string
-	maxAttempts         int
+	maxAttempts         uint64
 	mux                 *http.ServeMux
 }
 
@@ -95,7 +95,7 @@ func main() {
 		network                     = flag.String("network", lookupEnvString("NETWORK", "tcp"), "tcp, tcp4, tcp6, unix, unixpacket")
 		target                      = flag.String("target", lookupEnvString("TARGET", ""), "proxy to the given target")
 		verbosity                   = flag.String("verbosity", lookupEnvString("VERBOSITY", "Info"), "one of 'Debug', 'Info', 'Warn', or 'Error'")
-		maxAttempts                 = flag.Int("max-attempts", lookupEnvInt("MAX_ATTEMPTS", 10), "ban IP after max failed auth attempts (0 to disable)")
+		maxAttempts                 = flag.Uint64("max-attempts", lookupEnvUint("MAX_ATTEMPTS", 10), "ban IP after max failed auth attempts (0 to disable)")
 		banDuration                 = flag.Duration("ban-duration", lookupEnvDuration("BAN_DURATION", 1*time.Hour), "cleanup bans and failed login attempts (0 to disable)")
 		usersFlag                   = flag.String("users", lookupEnvString("USERS", ""), "allow the given basic auth credentals (e.g. user1:pass1,user2:pass2)")
 		allowHostsFlag              = flag.String("allow-hosts", lookupEnvString("ALLOW_HOSTS", ""), "allow the given host IPs (e.g. example.com)")
@@ -286,7 +286,7 @@ func (c *Controller) cleanupFailedAttempts(banDuration time.Duration) {
 		c.mutex.Lock()
 		for ip, info := range c.bannedIPs {
 			if info.bannedAt.Add(banDuration).After(time.Now()) {
-				// still banned
+				// still banned, or not yet expired
 				remainingBans[ip] = info
 			}
 		}
@@ -348,7 +348,7 @@ func (c *Controller) BasicAuth(requestIP netip.Addr, w http.ResponseWriter, r *h
 	banInfo := c.bannedIPs[requestIP]
 	c.mutex.Unlock()
 
-	if c.maxAttempts > 0 && banInfo.attempts >= uint(c.maxAttempts) {
+	if c.maxAttempts > 0 && banInfo.attempts >= c.maxAttempts {
 		return fmt.Errorf("IP is banned (addr=%s)", requestIP.String())
 	}
 
@@ -367,11 +367,16 @@ func (c *Controller) BasicAuth(requestIP netip.Addr, w http.ResponseWriter, r *h
 
 	c.mutex.Lock()
 	banInfo = c.bannedIPs[requestIP]
-	banInfo.attempts += 1
-	if banInfo.attempts == uint(c.maxAttempts) {
+	// Re-check under the lock (the check above can race against a concurrent
+	// request from the same IP) so an already-banned IP can never have its
+	// attempts or bannedAt touched again, and thus never have its ban extended.
+	if c.maxAttempts <= 0 || banInfo.attempts < c.maxAttempts {
+		banInfo.attempts += 1
+		// Track the time of the latest pre-ban attempt so cleanupFailedAttempts
+		// can also expire stale, not-yet-banned entries.
 		banInfo.bannedAt = time.Now()
+		c.bannedIPs[requestIP] = banInfo
 	}
-	c.bannedIPs[requestIP] = banInfo
 	c.mutex.Unlock()
 
 	// login failed, add a tarpit
@@ -505,7 +510,7 @@ func (c *Controller) Status(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for ip, banInfo := range c.bannedIPs {
-		if ip == requestIP && banInfo.attempts >= uint(c.maxAttempts) {
+		if ip == requestIP && banInfo.attempts >= c.maxAttempts {
 			status = fmt.Sprintf("banned at %s", banInfo.bannedAt)
 			break
 		}

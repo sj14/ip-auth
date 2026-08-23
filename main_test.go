@@ -17,7 +17,7 @@ func TestControllerCleanupBasicAuthIPs(t *testing.T) {
 		allowIPsByBasicAuth []basicAuthIP
 		denyPrivateIPs      bool
 		trustedIPHeader     string
-		maxAttempts         int
+		maxAttempts         uint64
 		mux                 *http.ServeMux
 	}
 	type args struct {
