@@ -2,7 +2,7 @@
 FROM golang:1 AS build
 
 WORKDIR /go/src/app
-COPY main.go .
+COPY *.go .
 COPY go.mod .
 COPY go.sum .
 
