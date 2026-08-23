@@ -510,7 +510,7 @@ func (c *Controller) Status(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for ip, banInfo := range c.bannedIPs {
-		if ip == requestIP && banInfo.attempts >= c.maxAttempts {
+		if ip == requestIP && c.maxAttempts > 0 && banInfo.attempts >= c.maxAttempts {
 			status = fmt.Sprintf("banned at %s", banInfo.bannedAt)
 			break
 		}
