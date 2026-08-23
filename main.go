@@ -446,16 +446,20 @@ func (c *Controller) HandleIP(w http.ResponseWriter, r *http.Request) (err error
 		}
 	}
 
-	if slices.Contains(c.allowIPsByHost, requestIP) {
+	c.mutex.RLock()
+	inAllowHost := slices.Contains(c.allowIPsByHost, requestIP)
+	c.mutex.RUnlock()
+	if inAllowHost {
 		slog.Debug("in allow list (host)", "addr", requestIP.String())
 		return nil
 	}
 
-	for _, ipInfo := range c.allowIPsByBasicAuth {
-		if ipInfo.ip == requestIP {
-			slog.Debug("in allow list (basic auth)", "addr", requestIP.String())
-			return nil
-		}
+	c.mutex.RLock()
+	inAllowBasicAuth := slices.ContainsFunc(c.allowIPsByBasicAuth, func(ipInfo basicAuthIP) bool { return ipInfo.ip == requestIP })
+	c.mutex.RUnlock()
+	if inAllowBasicAuth {
+		slog.Debug("in allow list (basic auth)", "addr", requestIP.String())
+		return nil
 	}
 
 	slog.Debug("not in allow list", "addr", requestIP)
