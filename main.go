@@ -95,6 +95,44 @@ func every(ctx context.Context, interval time.Duration, fn func()) {
 	}
 }
 
+// splitList splits a comma-separated flag value, trimming spaces and dropping
+// empty entries so that an unset flag or a trailing comma yields nothing.
+func splitList(value string) []string {
+	var entries []string
+	for _, entry := range strings.Split(value, ",") {
+		if entry = strings.TrimSpace(entry); entry != "" {
+			entries = append(entries, entry)
+		}
+	}
+	return entries
+}
+
+// parsePrefixes parses a comma-separated list of CIDR prefixes.
+func parsePrefixes(value string) ([]netip.Prefix, error) {
+	var prefixes []netip.Prefix
+	for _, entry := range splitList(value) {
+		prefix, err := netip.ParsePrefix(entry)
+		if err != nil {
+			return nil, fmt.Errorf("parsing CIDR %q: %w", entry, err)
+		}
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes, nil
+}
+
+// parseUsers parses a comma-separated list of user:password credentials.
+func parseUsers(value string) ([]BasicAuthCredentials, error) {
+	var users []BasicAuthCredentials
+	for _, entry := range splitList(value) {
+		name, password, ok := strings.Cut(entry, ":")
+		if !ok || name == "" {
+			return nil, fmt.Errorf("malformed user %q: want the form user:password", entry)
+		}
+		users = append(users, BasicAuthCredentials{Name: name, Password: password})
+	}
+	return users, nil
+}
+
 type banInfo struct {
 	attempts uint64
 	bannedAt time.Time
@@ -153,37 +191,28 @@ func main() {
 
 	slog.SetLogLoggerLevel(level)
 
+	allowedUsers, err := parseUsers(*usersFlag)
+	if err != nil {
+		log.Fatalf("failed parsing -users: %v", err)
+	}
+
+	allowCIDR, err := parsePrefixes(*allowCIDRFlag)
+	if err != nil {
+		log.Fatalf("failed parsing -allow-cidr: %v", err)
+	}
+
+	denyCIDR, err := parsePrefixes(*denyCIDRFlag)
+	if err != nil {
+		log.Fatalf("failed parsing -deny-cidr: %v", err)
+	}
+
 	cfg := config{
 		maxAttempts:     *maxAttempts,
 		denyPrivateIPs:  *denyPrivateIPs,
 		trustedIPHeader: *trustedIPHeader,
-	}
-
-	allowedUsers := strings.Split(*usersFlag, ",")
-	for _, user := range allowedUsers {
-		if user == "" {
-			continue
-		}
-		namePass := strings.SplitN(user, ":", 2)
-		if len(namePass) != 2 {
-			slog.Error("malformed user", "user", namePass)
-			continue
-		}
-		cfg.allowedUsers = append(cfg.allowedUsers, BasicAuthCredentials{Name: namePass[0], Password: namePass[1]})
-	}
-
-	allowedIPs := strings.Split(*allowCIDRFlag, ",")
-	if len(allowedIPs) > 0 && allowedIPs[0] != "" {
-		for _, ip := range allowedIPs {
-			cfg.allowCIDRFix = append(cfg.allowCIDRFix, netip.MustParsePrefix(ip))
-		}
-	}
-
-	deniedIPs := strings.Split(*denyCIDRFlag, ",")
-	if len(deniedIPs) > 0 && deniedIPs[0] != "" {
-		for _, ip := range deniedIPs {
-			cfg.denyCIDR = append(cfg.denyCIDR, netip.MustParsePrefix(ip))
-		}
+		allowedUsers:    allowedUsers,
+		allowCIDRFix:    allowCIDR,
+		denyCIDR:        denyCIDR,
 	}
 
 	c := Controller{
@@ -198,8 +227,8 @@ func main() {
 	defer stop()
 
 	// Add dynamic IPs and renew frequently
-	allowedHosts := strings.Split(*allowHostsFlag, ",")
-	if len(allowedHosts) > 0 && allowedHosts[0] != "" {
+	allowedHosts := splitList(*allowHostsFlag)
+	if len(allowedHosts) > 0 {
 		go every(ctx, *cleanupHostIPsInterval, func() {
 			c.renewAllowIPsByHost(allowedHosts)
 		})
