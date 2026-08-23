@@ -514,11 +514,8 @@ func (c *Controller) Status(w http.ResponseWriter, r *http.Request) {
 		status = "denied (private IP)"
 	}
 
-	for ip, banInfo := range c.bannedIPs {
-		if ip == requestIP && c.maxAttempts > 0 && banInfo.attempts >= c.maxAttempts {
-			status = fmt.Sprintf("banned at %s", banInfo.bannedAt)
-			break
-		}
+	if banInfo, ok := c.bannedIPs[requestIP]; ok && c.maxAttempts > 0 && banInfo.attempts >= c.maxAttempts {
+		status = fmt.Sprintf("banned at %s", banInfo.bannedAt)
 	}
 
 	for _, cidr := range c.denyCIDR {
