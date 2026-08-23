@@ -353,15 +353,10 @@ type BasicAuthCredentials struct {
 	Password string
 }
 
+// BasicAuth verifies the request credentials and records a failed attempt when
+// they don't match. Callers must reject already-banned IPs via evaluate first;
+// the ban rule lives there so HandleIP and Status can't disagree about it.
 func (c *Controller) BasicAuth(requestIP netip.Addr, w http.ResponseWriter, r *http.Request) error {
-	c.mutex.Lock()
-	banInfo := c.bannedIPs[requestIP]
-	c.mutex.Unlock()
-
-	if c.maxAttempts > 0 && banInfo.attempts >= c.maxAttempts {
-		return fmt.Errorf("IP is banned (addr=%s)", requestIP.String())
-	}
-
 	givenUser, givenPass, _ := r.BasicAuth()
 
 	if len(c.allowedUsers) == 0 {
@@ -378,10 +373,11 @@ func (c *Controller) BasicAuth(requestIP netip.Addr, w http.ResponseWriter, r *h
 	}
 
 	c.mutex.Lock()
-	banInfo = c.bannedIPs[requestIP]
-	// Re-check under the lock (the check above can race against a concurrent
-	// request from the same IP) so an already-banned IP can never have its
-	// attempts or bannedAt touched again, and thus never have its ban extended.
+	banInfo := c.bannedIPs[requestIP]
+	// Re-check under the lock (evaluate's check happens outside it, so a
+	// concurrent request from the same IP can ban it in between) to make sure an
+	// already-banned IP never has its attempts or bannedAt touched again, and
+	// thus never has its ban extended.
 	if c.maxAttempts <= 0 || banInfo.attempts < c.maxAttempts {
 		banInfo.attempts += 1
 		// Track the time of the latest pre-ban attempt so cleanupFailedAttempts
@@ -429,6 +425,65 @@ func (c *Controller) ReadUserIP(r *http.Request) (netip.Addr, error) {
 	return netip.ParseAddr(addr)
 }
 
+type verdict int
+
+const (
+	// verdictChallenge is the zero value: the IP is on no list, so Basic Auth decides.
+	verdictChallenge verdict = iota
+	verdictAllowed
+	verdictDenied
+)
+
+// decision is the outcome of evaluating an IP against every allow/deny rule,
+// along with a human-readable reason suitable for logs and the status endpoint.
+type decision struct {
+	verdict verdict
+	reason  string
+}
+
+// evaluate applies the allow/deny rules in priority order and is the single
+// source of truth for that ordering: deny rules win over allow rules, and an
+// IP on any allow list is let through regardless of its ban record.
+// HandleIP and Status must both go through here so they can never disagree.
+func (c *Controller) evaluate(ip netip.Addr) decision {
+	// These fields are only written during startup, before any handler runs,
+	// so they need no lock.
+	if c.denyPrivateIPs && isPrivateAddr(ip) {
+		return decision{verdictDenied, "denied (private IP)"}
+	}
+
+	for _, cidr := range c.denyCIDR {
+		if cidr.Contains(ip) {
+			return decision{verdictDenied, fmt.Sprintf("denied CIDR (%s)", cidr.String())}
+		}
+	}
+
+	for _, cidr := range c.allowCIDRFix {
+		if cidr.Contains(ip) {
+			return decision{verdictAllowed, fmt.Sprintf("allowed CIDR (%s)", cidr.String())}
+		}
+	}
+
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+
+	if slices.Contains(c.allowIPsByHost, ip) {
+		return decision{verdictAllowed, "allowed IP by host"}
+	}
+
+	for _, ipInfo := range c.allowIPsByBasicAuth {
+		if ipInfo.ip == ip {
+			return decision{verdictAllowed, fmt.Sprintf("allowed IP by Basic Auth at %s", ipInfo.allowedAt)}
+		}
+	}
+
+	if info, ok := c.bannedIPs[ip]; ok && c.maxAttempts > 0 && info.attempts >= c.maxAttempts {
+		return decision{verdictDenied, fmt.Sprintf("banned at %s", info.bannedAt)}
+	}
+
+	return decision{verdictChallenge, "denied"}
+}
+
 func (c *Controller) HandleIP(w http.ResponseWriter, r *http.Request) (err error) {
 	defer func() {
 		if err == nil {
@@ -444,37 +499,12 @@ func (c *Controller) HandleIP(w http.ResponseWriter, r *http.Request) (err error
 		return err
 	}
 
-	if c.denyPrivateIPs && isPrivateAddr(requestIP) {
-		return fmt.Errorf("private IPs are blocked (addr=%s)", requestIP.String())
-	}
-
-	for _, cidr := range c.denyCIDR {
-		if cidr.Contains(requestIP) {
-			return fmt.Errorf("in deny list (addr=%s)", requestIP.String())
-		}
-	}
-
-	for _, cidr := range c.allowCIDRFix {
-		if cidr.Contains(requestIP) {
-			slog.Debug("in allow list (fixed ip)", "addr", requestIP.String())
-			return nil
-		}
-	}
-
-	c.mutex.RLock()
-	inAllowHost := slices.Contains(c.allowIPsByHost, requestIP)
-	c.mutex.RUnlock()
-	if inAllowHost {
-		slog.Debug("in allow list (host)", "addr", requestIP.String())
+	switch d := c.evaluate(requestIP); d.verdict {
+	case verdictAllowed:
+		slog.Debug("in allow list", "addr", requestIP.String(), "reason", d.reason)
 		return nil
-	}
-
-	c.mutex.RLock()
-	inAllowBasicAuth := slices.ContainsFunc(c.allowIPsByBasicAuth, func(ipInfo basicAuthIP) bool { return ipInfo.ip == requestIP })
-	c.mutex.RUnlock()
-	if inAllowBasicAuth {
-		slog.Debug("in allow list (basic auth)", "addr", requestIP.String())
-		return nil
+	case verdictDenied:
+		return fmt.Errorf("%s (addr=%s)", d.reason, requestIP.String())
 	}
 
 	slog.Debug("not in allow list", "addr", requestIP)
@@ -510,42 +540,8 @@ func (c *Controller) Status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
+	d := c.evaluate(requestIP)
 
-	status := "denied"
-
-	if c.denyPrivateIPs && isPrivateAddr(requestIP) {
-		status = "denied (private IP)"
-	}
-
-	if banInfo, ok := c.bannedIPs[requestIP]; ok && c.maxAttempts > 0 && banInfo.attempts >= c.maxAttempts {
-		status = fmt.Sprintf("banned at %s", banInfo.bannedAt)
-	}
-
-	for _, cidr := range c.denyCIDR {
-		if cidr.Contains(requestIP) {
-			status = fmt.Sprintf("denied CIDR (%s)", cidr.String())
-			break
-		}
-	}
-	for _, cidr := range c.allowCIDRFix {
-		if cidr.Contains(requestIP) {
-			status = fmt.Sprintf("allowed CIDR (%s)", cidr.String())
-			break
-		}
-	}
-	if slices.Contains(c.allowIPsByHost, requestIP) {
-		status = "allowed IP by host"
-	}
-
-	for _, ipInfo := range c.allowIPsByBasicAuth {
-		if ipInfo.ip == requestIP {
-			status = fmt.Sprintf("allowed IP by Basic Auth at %s", ipInfo.allowedAt)
-			break
-		}
-	}
-
-	w.Write([]byte(fmt.Sprintf("ip: %s\n", requestIP)))
-	w.Write([]byte(fmt.Sprintf("status: %s\n", status)))
+	fmt.Fprintf(w, "ip: %s\n", requestIP)
+	fmt.Fprintf(w, "status: %s\n", d.reason)
 }
