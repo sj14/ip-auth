@@ -52,7 +52,7 @@ go install github.com/sj14/ip-auth@latest
   -host-ip-renewal duration
         Renew host IPs (0 to resolve once and disable renewal) (default 1h0m0s)
   -ip-header string
-        e.g. 'X-Real-Ip' or 'X-Forwarded-For' when you want to extract the IP from the given header
+        e.g. 'X-Real-Ip' or 'X-Forwarded-For' when you want to extract the IP from the given header (uses the rightmost entry, so put this behind exactly one trusted proxy)
   -listen string
         listen for connections (default ":8080")
   -max-attempts int
@@ -70,3 +70,11 @@ go install github.com/sj14/ip-auth@latest
 ```
 
 All options can also be set as environment variables by using their uppercase flag names and changing dashes (-) with underscores (_).
+
+### Running behind a proxy
+
+By default the client IP is taken from the connection itself. When IP Auth runs behind a reverse proxy, that address is the proxy's, so use `-ip-header` to read the client IP from a forwarding header instead.
+
+`X-Forwarded-For` holds a `client, proxy1, proxy2` list, and only the **rightmost** entry is appended by the proxy directly in front of IP Auth — everything to its left can be forged by the client simply sending its own `X-Forwarded-For`. IP Auth therefore uses the rightmost entry, which assumes **exactly one trusted proxy** sits in front of it. With additional hops the rightmost entry is the previous proxy rather than the client.
+
+Only set `-ip-header` when a proxy you control always overwrites or appends to that header. If clients can reach IP Auth directly, they can set the header themselves and choose their own identity.

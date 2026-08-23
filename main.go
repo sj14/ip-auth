@@ -139,7 +139,7 @@ func main() {
 		allowCIDRFlag               = flag.String("allow-cidr", lookupEnvString("ALLOW_CIDR", ""), "allow the given CIDR (e.g. 10.0.0.0/8,192.168.0.0/16)")
 		denyCIDRFlag                = flag.String("deny-cidr", lookupEnvString("DENY_CIDR", ""), "block the given CIDR (e.g. 10.0.0.0/8,192.168.0.0/16)")
 		denyPrivateIPs              = flag.Bool("deny-private", lookupEnvBool("DENY_PRIVATE", false), "deny IPs from the private network space")
-		trustedIPHeader             = flag.String("ip-header", lookupEnvString("IP_HEADER", ""), "e.g. 'X-Real-Ip' or 'X-Forwarded-For' when you want to extract the IP from the given header")
+		trustedIPHeader             = flag.String("ip-header", lookupEnvString("IP_HEADER", ""), "e.g. 'X-Real-Ip' or 'X-Forwarded-For' when you want to extract the IP from the given header (uses the rightmost entry, so put this behind exactly one trusted proxy)")
 		cleanupHostIPsInterval      = flag.Duration("host-ip-renewal", lookupEnvDuration("HOST_IP_RENEWAL", 1*time.Hour), "Renew host IPs (0 to resolve once and disable renewal)")
 		cleanupBasicAuthIPsInterval = flag.Duration("basic-auth-duration", lookupEnvDuration("BASIC_AUTH_DURATION", 12*time.Hour), "Cleanup Basic Auth authentications (0 to disable)")
 	)
@@ -221,7 +221,7 @@ func main() {
 
 	proxy, err := NewProxy(*target)
 	if err != nil {
-		panic(err)
+		log.Fatalf("failed setting up the proxy: %v", err)
 	}
 
 	mux := http.NewServeMux()
@@ -352,14 +352,29 @@ func (c *Controller) hostToIP(host string) ([]netip.Addr, error) {
 }
 
 func NewProxy(targetHost string) (*httputil.ReverseProxy, error) {
-	url, err := url.Parse(targetHost)
+	if targetHost == "" {
+		return nil, errors.New("no target specified")
+	}
+
+	// url.Parse accepts almost anything, so check the parts we actually need:
+	// without a scheme and host the proxy would silently rewrite every request
+	// to an empty URL.
+	target, err := url.Parse(targetHost)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parsing target %q: %w", targetHost, err)
+	}
+
+	if target.Scheme != "http" && target.Scheme != "https" {
+		return nil, fmt.Errorf("target %q: want an http:// or https:// URL", targetHost)
+	}
+
+	if target.Host == "" {
+		return nil, fmt.Errorf("target %q: missing host", targetHost)
 	}
 
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
-			r.SetURL(url)
+			r.SetURL(target)
 			r.Out.Host = r.In.Host // if desired
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -427,11 +442,41 @@ func (c *Controller) BasicAuth(requestIP netip.Addr, r *http.Request) error {
 	return fmt.Errorf("failed basic auth (user=%s addr=%s attempts=%d)", givenUser, requestIP, banInfo.attempts)
 }
 
+// rightmostHeaderIP returns the last entry of the last instance of the given
+// header, or "" when the header is absent or empty.
+//
+// Headers like X-Forwarded-For carry a "client, proxy1, proxy2" list in which
+// every entry except the last was supplied by something upstream that we do not
+// control - a client can simply send its own X-Forwarded-For to forge them.
+// Only the rightmost entry is appended by our own immediate proxy, so it is the
+// one to trust. That assumes exactly one trusted proxy sits in front of us; with
+// more hops the rightmost entry is the previous proxy rather than the client.
+func rightmostHeaderIP(r *http.Request, header string) string {
+	values := r.Header.Values(header)
+	if len(values) == 0 {
+		return ""
+	}
+
+	// A proxy may append to the existing header line or add another one; either
+	// way the last entry of the last line is the most recently appended.
+	last := values[len(values)-1]
+	if i := strings.LastIndex(last, ","); i >= 0 {
+		last = last[i+1:]
+	}
+
+	return strings.TrimSpace(last)
+}
+
 func (c *Controller) ReadUserIP(r *http.Request) (netip.Addr, error) {
 	if c.cfg.trustedIPHeader != "" {
-		if ip := r.Header.Get(c.cfg.trustedIPHeader); ip != "" {
+		if ip := rightmostHeaderIP(r, c.cfg.trustedIPHeader); ip != "" {
 			slog.Debug("IP from header", "header", c.cfg.trustedIPHeader, "addr", ip)
-			return netip.ParseAddr(ip)
+
+			addr, err := netip.ParseAddr(ip)
+			if err != nil {
+				return netip.Addr{}, fmt.Errorf("parsing %q from header %q: %w", ip, c.cfg.trustedIPHeader, err)
+			}
+			return addr, nil
 		}
 	}
 
