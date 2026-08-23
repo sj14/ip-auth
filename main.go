@@ -66,6 +66,35 @@ func lookupEnvDuration(key string, defaultVal time.Duration) time.Duration {
 	return defaultVal
 }
 
+// How often the background sweeps run. The expiry windows they enforce are
+// configurable; how often we check for expiry is not.
+const (
+	basicAuthSweepInterval = 1 * time.Minute
+	banSweepInterval       = 1 * time.Minute
+)
+
+// every runs fn immediately and then once per interval until ctx is canceled.
+// A non-positive interval runs fn exactly once.
+func every(ctx context.Context, interval time.Duration, fn func()) {
+	fn()
+
+	if interval <= 0 {
+		return
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			fn()
+		}
+	}
+}
+
 type banInfo struct {
 	attempts uint64
 	bannedAt time.Time
@@ -165,25 +194,29 @@ func main() {
 		},
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	// Add dynamic IPs and renew frequently
 	allowedHosts := strings.Split(*allowHostsFlag, ",")
 	if len(allowedHosts) > 0 && allowedHosts[0] != "" {
-		go c.generateAllowIPsByHost(*cleanupHostIPsInterval, allowedHosts)
+		go every(ctx, *cleanupHostIPsInterval, func() {
+			c.renewAllowIPsByHost(allowedHosts)
+		})
 	}
 
 	// Cleanup expired Basic Auth IPs
 	if *cleanupBasicAuthIPsInterval > 0 {
-		go func() {
-			for {
-				time.Sleep(1 * time.Minute)
-				c.cleanupBasicAuthIPs(*cleanupBasicAuthIPsInterval)
-			}
-		}()
+		go every(ctx, basicAuthSweepInterval, func() {
+			c.cleanupBasicAuthIPs(*cleanupBasicAuthIPsInterval)
+		})
 	}
 
 	// Cleanup bans
 	if *banDuration > 0 {
-		go c.cleanupFailedAttempts(*banDuration)
+		go every(ctx, banSweepInterval, func() {
+			c.cleanupFailedAttempts(*banDuration)
+		})
 	}
 
 	proxy, err := NewProxy(*target)
@@ -195,12 +228,12 @@ func main() {
 	mux.HandleFunc("/", c.ProxyRequestHandler(proxy))
 	mux.HandleFunc(*statusPath, c.Status)
 
-	c.listen(*listen, *network, mux)
+	c.listen(ctx, *listen, *network, mux)
 
 	slog.Info("shut down")
 }
 
-func (c *Controller) listen(addr, network string, handler http.Handler) {
+func (c *Controller) listen(ctx context.Context, addr, network string, handler http.Handler) {
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: handler,
@@ -211,17 +244,7 @@ func (c *Controller) listen(addr, network string, handler http.Handler) {
 		log.Fatalln(err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-
-	go func() {
-		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-
-		<-sig
-		cancel()
-	}()
-
-	g, ctx := errgroup.WithContext(ctx)
+	g, gctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
 		slog.Info("listening", "addr", addr, "network", network)
@@ -229,11 +252,14 @@ func (c *Controller) listen(addr, network string, handler http.Handler) {
 	})
 
 	g.Go(func() error {
-		<-ctx.Done()
+		<-gctx.Done()
 		slog.Info("shutting down")
-		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		// Derive the timeout from a live context: gctx is already canceled by
+		// the time we get here, so deriving from it would cancel Shutdown
+		// immediately instead of letting it drain open connections.
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(gctx), 10*time.Second)
 		defer cancel()
-		return srv.Shutdown(ctx)
+		return srv.Shutdown(shutdownCtx)
 	})
 
 	if err := g.Wait(); err != nil {
@@ -241,33 +267,26 @@ func (c *Controller) listen(addr, network string, handler http.Handler) {
 	}
 }
 
-// Will recheck IPs from hosts and cleanup all dynamic IPs added by basic auth.
-func (c *Controller) generateAllowIPsByHost(resetInterval time.Duration, allowedHosts []string) {
-	for {
-		slog.Info("renewing IPs by hosts")
+// renewAllowIPsByHost re-resolves every allowed host and replaces the IPs they
+// currently map to.
+func (c *Controller) renewAllowIPsByHost(allowedHosts []string) {
+	slog.Info("renewing IPs by hosts")
 
-		var newIPs []netip.Addr
-		for _, host := range allowedHosts {
-			hostIPs, err := c.hostToIP(host)
-			if err != nil {
-				slog.Error("hostToIP", "host", host, "error", err)
-				continue
-			}
-			slog.Info("adding", "host", host, "IPs", hostIPs)
-			newIPs = append(newIPs, hostIPs...)
+	var newIPs []netip.Addr
+	for _, host := range allowedHosts {
+		hostIPs, err := c.hostToIP(host)
+		if err != nil {
+			slog.Error("hostToIP", "host", host, "error", err)
+			continue
 		}
-
-		c.state.mu.Lock()
-		c.state.allowIPsByHost = newIPs
-		c.state.mu.Unlock()
-
-		if resetInterval <= 0 {
-			// resolve once, renewal disabled
-			return
-		}
-
-		time.Sleep(resetInterval)
+		slog.Info("adding", "host", host, "IPs", hostIPs)
+		newIPs = append(newIPs, hostIPs...)
 	}
+
+	c.state.mu.Lock()
+	defer c.state.mu.Unlock()
+
+	c.state.allowIPsByHost = newIPs
 }
 
 func (c *Controller) cleanupBasicAuthIPs(expireInterval time.Duration) {
@@ -289,26 +308,25 @@ func (c *Controller) cleanupBasicAuthIPs(expireInterval time.Duration) {
 	})
 }
 
-// Cleanup bans and failed login attempts.
+// cleanupFailedAttempts drops bans and failed login attempts older than banDuration.
 func (c *Controller) cleanupFailedAttempts(banDuration time.Duration) {
-	for {
-		time.Sleep(5 * time.Minute)
+	slog.Debug("cleanup bans and failed logins", "ban duration", banDuration.String())
 
-		slog.Debug("cleanup bans and failed logins")
+	c.state.mu.Lock()
+	defer c.state.mu.Unlock()
 
-		remainingBans := make(map[netip.Addr]banInfo)
-
-		c.state.mu.Lock()
-		for ip, info := range c.state.bannedIPs {
-			if info.bannedAt.Add(banDuration).After(time.Now()) {
-				// still banned, or not yet expired
-				remainingBans[ip] = info
-			}
+	maps.DeleteFunc(c.state.bannedIPs, func(ip netip.Addr, info banInfo) bool {
+		if info.bannedAt.Add(banDuration).After(time.Now()) {
+			// still banned, or not yet expired
+			return false
 		}
-
-		c.state.bannedIPs = remainingBans
-		c.state.mu.Unlock()
-	}
+		slog.Debug("expired ban",
+			"ip", ip.String(),
+			"banned_at", info.bannedAt,
+			"attempts", info.attempts,
+		)
+		return true
+	})
 }
 
 func isPrivateAddr(ip netip.Addr) bool {
