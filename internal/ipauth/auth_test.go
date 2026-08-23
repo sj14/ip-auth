@@ -1,4 +1,4 @@
-package main
+package ipauth
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 // newAuthRequest builds a request carrying the given credentials, or none when
 // creds is nil. Its context is already canceled so that BasicAuth's 5 second
 // failure tarpit returns immediately instead of stalling the test.
-func newAuthRequest(creds *BasicAuthCredentials) *http.Request {
+func newAuthRequest(creds *Credentials) *http.Request {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -23,64 +23,64 @@ func newAuthRequest(creds *BasicAuthCredentials) *http.Request {
 	return r
 }
 
-func newAuthController(users []BasicAuthCredentials, maxAttempts uint64) *Controller {
-	return &Controller{
-		cfg:   config{allowedUsers: users, maxAttempts: maxAttempts},
+func newAuthController(users []Credentials, maxAttempts uint64) *controller {
+	return &controller{
+		cfg:   Config{Users: users, MaxAttempts: maxAttempts},
 		state: state{bannedIPs: map[netip.Addr]banInfo{}},
 	}
 }
 
 func TestControllerBasicAuth(t *testing.T) {
 	ip := netip.MustParseAddr("203.0.113.7")
-	users := []BasicAuthCredentials{
+	users := []Credentials{
 		{Name: "alice", Password: "secret"},
 		{Name: "bob", Password: "hunter2"},
 	}
 
 	tests := []struct {
 		name         string
-		users        []BasicAuthCredentials
-		creds        *BasicAuthCredentials
+		users        []Credentials
+		creds        *Credentials
 		wantErr      bool
 		wantAttempts uint64
 	}{
 		{
 			name:    "first user matches",
 			users:   users,
-			creds:   &BasicAuthCredentials{Name: "alice", Password: "secret"},
+			creds:   &Credentials{Name: "alice", Password: "secret"},
 			wantErr: false,
 		},
 		{
 			name:    "later user in the list matches",
 			users:   users,
-			creds:   &BasicAuthCredentials{Name: "bob", Password: "hunter2"},
+			creds:   &Credentials{Name: "bob", Password: "hunter2"},
 			wantErr: false,
 		},
 		{
 			// Regression: a colon in the password must survive parsing and compare.
 			name:    "password containing a colon",
-			users:   []BasicAuthCredentials{{Name: "alice", Password: "p@ss:word"}},
-			creds:   &BasicAuthCredentials{Name: "alice", Password: "p@ss:word"},
+			users:   []Credentials{{Name: "alice", Password: "p@ss:word"}},
+			creds:   &Credentials{Name: "alice", Password: "p@ss:word"},
 			wantErr: false,
 		},
 		{
 			name:         "wrong password",
 			users:        users,
-			creds:        &BasicAuthCredentials{Name: "alice", Password: "wrong"},
+			creds:        &Credentials{Name: "alice", Password: "wrong"},
 			wantErr:      true,
 			wantAttempts: 1,
 		},
 		{
 			name:         "wrong user",
 			users:        users,
-			creds:        &BasicAuthCredentials{Name: "mallory", Password: "secret"},
+			creds:        &Credentials{Name: "mallory", Password: "secret"},
 			wantErr:      true,
 			wantAttempts: 1,
 		},
 		{
 			name:         "right password but wrong user",
 			users:        users,
-			creds:        &BasicAuthCredentials{Name: "bob", Password: "secret"},
+			creds:        &Credentials{Name: "bob", Password: "secret"},
 			wantErr:      true,
 			wantAttempts: 1,
 		},
@@ -98,7 +98,7 @@ func TestControllerBasicAuth(t *testing.T) {
 			// recording an attempt, since no credential could ever succeed.
 			name:         "no users configured",
 			users:        nil,
-			creds:        &BasicAuthCredentials{Name: "alice", Password: "secret"},
+			creds:        &Credentials{Name: "alice", Password: "secret"},
 			wantErr:      true,
 			wantAttempts: 0,
 		},
@@ -108,7 +108,7 @@ func TestControllerBasicAuth(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			c := newAuthController(tt.users, 10)
 
-			err := c.BasicAuth(ip, newAuthRequest(tt.creds))
+			err := c.basicAuth(ip, newAuthRequest(tt.creds))
 
 			if tt.wantErr && err == nil {
 				t.Fatal("BasicAuth() = nil, want an error")
@@ -126,10 +126,10 @@ func TestControllerBasicAuth(t *testing.T) {
 
 func TestControllerBasicAuthAttemptsAccumulate(t *testing.T) {
 	ip := netip.MustParseAddr("203.0.113.7")
-	c := newAuthController([]BasicAuthCredentials{{Name: "alice", Password: "secret"}}, 10)
+	c := newAuthController([]Credentials{{Name: "alice", Password: "secret"}}, 10)
 
 	for want := uint64(1); want <= 3; want++ {
-		if err := c.BasicAuth(ip, newAuthRequest(&BasicAuthCredentials{Name: "alice", Password: "wrong"})); err == nil {
+		if err := c.basicAuth(ip, newAuthRequest(&Credentials{Name: "alice", Password: "wrong"})); err == nil {
 			t.Fatalf("attempt %d: BasicAuth() = nil, want an error", want)
 		}
 		if got := c.state.bannedIPs[ip].attempts; got != want {
@@ -139,7 +139,7 @@ func TestControllerBasicAuthAttemptsAccumulate(t *testing.T) {
 
 	// A success does not clear the record here; HandleIP does that once the IP
 	// has been added to the Basic Auth allow list.
-	if err := c.BasicAuth(ip, newAuthRequest(&BasicAuthCredentials{Name: "alice", Password: "secret"})); err != nil {
+	if err := c.basicAuth(ip, newAuthRequest(&Credentials{Name: "alice", Password: "secret"})); err != nil {
 		t.Fatalf("BasicAuth() with valid credentials returned: %v", err)
 	}
 	if got := c.state.bannedIPs[ip].attempts; got != 3 {
@@ -150,9 +150,9 @@ func TestControllerBasicAuthAttemptsAccumulate(t *testing.T) {
 func TestControllerBasicAuthDoesNotExtendBan(t *testing.T) {
 	ip := netip.MustParseAddr("203.0.113.7")
 	const maxAttempts = 3
-	c := newAuthController([]BasicAuthCredentials{{Name: "alice", Password: "secret"}}, maxAttempts)
+	c := newAuthController([]Credentials{{Name: "alice", Password: "secret"}}, maxAttempts)
 
-	bad := func() { _ = c.BasicAuth(ip, newAuthRequest(&BasicAuthCredentials{Name: "alice", Password: "wrong"})) }
+	bad := func() { _ = c.basicAuth(ip, newAuthRequest(&Credentials{Name: "alice", Password: "wrong"})) }
 
 	for range maxAttempts {
 		bad()
@@ -184,10 +184,10 @@ func TestControllerBasicAuthDoesNotExtendBan(t *testing.T) {
 func TestControllerBasicAuthMaxAttemptsDisabled(t *testing.T) {
 	ip := netip.MustParseAddr("203.0.113.7")
 	// maxAttempts 0 disables banning, so attempts keep counting and never freeze.
-	c := newAuthController([]BasicAuthCredentials{{Name: "alice", Password: "secret"}}, 0)
+	c := newAuthController([]Credentials{{Name: "alice", Password: "secret"}}, 0)
 
 	for want := uint64(1); want <= 4; want++ {
-		if err := c.BasicAuth(ip, newAuthRequest(&BasicAuthCredentials{Name: "alice", Password: "wrong"})); err == nil {
+		if err := c.basicAuth(ip, newAuthRequest(&Credentials{Name: "alice", Password: "wrong"})); err == nil {
 			t.Fatalf("attempt %d: BasicAuth() = nil, want an error", want)
 		}
 		if got := c.state.bannedIPs[ip].attempts; got != want {

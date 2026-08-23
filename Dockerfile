@@ -2,11 +2,10 @@
 FROM golang:1 AS build
 
 WORKDIR /go/src/app
-COPY *.go .
-COPY go.mod .
-COPY go.sum .
-
+COPY go.mod go.sum ./
 RUN go mod download
+
+COPY . .
 RUN CGO_ENABLED=0 go build -o /go/bin/app
 
 # Final stage

@@ -1,10 +1,9 @@
-package main
+package ipauth
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -17,22 +16,40 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-func (c *Controller) listen(ctx context.Context, addr, network string, handler http.Handler) {
+// Run starts the proxy and blocks until ctx is canceled and the server has shut
+// down, or until it fails to start.
+func Run(ctx context.Context, cfg Config) error {
+	proxy, err := newProxy(cfg.Target)
+	if err != nil {
+		return fmt.Errorf("setting up the proxy: %w", err)
+	}
+
+	c := newController(cfg)
+	c.startSweeps(ctx)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", c.proxyRequestHandler(proxy))
+	mux.HandleFunc(cfg.StatusPath, c.status)
+
+	return c.listen(ctx, mux)
+}
+
+func (c *controller) listen(ctx context.Context, handler http.Handler) error {
 	srv := &http.Server{
-		Addr:    addr,
+		Addr:    c.cfg.Listen,
 		Handler: handler,
 	}
 
-	listen, err := net.Listen(network, addr)
+	listener, err := net.Listen(c.cfg.Network, c.cfg.Listen)
 	if err != nil {
-		log.Fatalln(err)
+		return fmt.Errorf("listening on %s/%s: %w", c.cfg.Network, c.cfg.Listen, err)
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
-		slog.Info("listening", "addr", addr, "network", network)
-		return srv.Serve(listen)
+		slog.Info("listening", "addr", c.cfg.Listen, "network", c.cfg.Network)
+		return srv.Serve(listener)
 	})
 
 	g.Go(func() error {
@@ -46,12 +63,16 @@ func (c *Controller) listen(ctx context.Context, addr, network string, handler h
 		return srv.Shutdown(shutdownCtx)
 	})
 
-	if err := g.Wait(); err != nil {
-		slog.Info("exit", "reason", err)
+	// Serve always returns ErrServerClosed once Shutdown has been called, which
+	// is the normal way to stop and not a failure.
+	if err := g.Wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
 	}
+
+	return nil
 }
 
-func NewProxy(targetHost string) (*httputil.ReverseProxy, error) {
+func newProxy(targetHost string) (*httputil.ReverseProxy, error) {
 	if targetHost == "" {
 		return nil, errors.New("no target specified")
 	}
@@ -115,14 +136,14 @@ func rightmostHeaderIP(r *http.Request, header string) string {
 	return strings.TrimSpace(last)
 }
 
-func (c *Controller) ReadUserIP(r *http.Request) (netip.Addr, error) {
-	if c.cfg.trustedIPHeader != "" {
-		if ip := rightmostHeaderIP(r, c.cfg.trustedIPHeader); ip != "" {
-			slog.Debug("IP from header", "header", c.cfg.trustedIPHeader, "addr", ip)
+func (c *controller) readUserIP(r *http.Request) (netip.Addr, error) {
+	if c.cfg.TrustedIPHeader != "" {
+		if ip := rightmostHeaderIP(r, c.cfg.TrustedIPHeader); ip != "" {
+			slog.Debug("IP from header", "header", c.cfg.TrustedIPHeader, "addr", ip)
 
 			addr, err := netip.ParseAddr(ip)
 			if err != nil {
-				return netip.Addr{}, fmt.Errorf("parsing %q from header %q: %w", ip, c.cfg.trustedIPHeader, err)
+				return netip.Addr{}, fmt.Errorf("parsing %q from header %q: %w", ip, c.cfg.TrustedIPHeader, err)
 			}
 			return addr, nil
 		}
@@ -138,7 +159,7 @@ func (c *Controller) ReadUserIP(r *http.Request) (netip.Addr, error) {
 	return netip.ParseAddr(addr)
 }
 
-func (c *Controller) HandleIP(w http.ResponseWriter, r *http.Request) (err error) {
+func (c *controller) handleIP(w http.ResponseWriter, r *http.Request) (err error) {
 	defer func() {
 		if err == nil {
 			return
@@ -148,7 +169,7 @@ func (c *Controller) HandleIP(w http.ResponseWriter, r *http.Request) (err error
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 	}()
 
-	requestIP, err := c.ReadUserIP(r)
+	requestIP, err := c.readUserIP(r)
 	if err != nil {
 		return err
 	}
@@ -163,7 +184,7 @@ func (c *Controller) HandleIP(w http.ResponseWriter, r *http.Request) (err error
 
 	slog.Debug("not in allow list", "addr", requestIP)
 
-	err = c.BasicAuth(requestIP, r)
+	err = c.basicAuth(requestIP, r)
 	if err != nil {
 		return err
 	}
@@ -176,9 +197,9 @@ func (c *Controller) HandleIP(w http.ResponseWriter, r *http.Request) (err error
 	return nil
 }
 
-func (c *Controller) ProxyRequestHandler(proxy *httputil.ReverseProxy) func(http.ResponseWriter, *http.Request) {
+func (c *controller) proxyRequestHandler(proxy *httputil.ReverseProxy) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		err := c.HandleIP(w, r)
+		err := c.handleIP(w, r)
 		if err != nil {
 			return
 		}
@@ -187,8 +208,8 @@ func (c *Controller) ProxyRequestHandler(proxy *httputil.ReverseProxy) func(http
 	}
 }
 
-func (c *Controller) Status(w http.ResponseWriter, r *http.Request) {
-	requestIP, err := c.ReadUserIP(r)
+func (c *controller) status(w http.ResponseWriter, r *http.Request) {
+	requestIP, err := c.readUserIP(r)
 	if err != nil {
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return

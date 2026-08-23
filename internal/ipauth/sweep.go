@@ -1,4 +1,4 @@
-package main
+package ipauth
 
 import (
 	"context"
@@ -38,9 +38,34 @@ func every(ctx context.Context, interval time.Duration, fn func()) {
 	}
 }
 
+// startSweeps launches the background jobs that renew host IPs and expire stale
+// Basic Auth grants and bans. They all stop when ctx is canceled.
+func (c *controller) startSweeps(ctx context.Context) {
+	// Add dynamic IPs and renew frequently.
+	if len(c.cfg.AllowHosts) > 0 {
+		go every(ctx, c.cfg.HostIPRenewal, func() {
+			c.renewAllowIPsByHost(c.cfg.AllowHosts)
+		})
+	}
+
+	// Cleanup expired Basic Auth IPs.
+	if c.cfg.BasicAuthDuration > 0 {
+		go every(ctx, basicAuthSweepInterval, func() {
+			c.cleanupBasicAuthIPs(c.cfg.BasicAuthDuration)
+		})
+	}
+
+	// Cleanup bans.
+	if c.cfg.BanDuration > 0 {
+		go every(ctx, banSweepInterval, func() {
+			c.cleanupFailedAttempts(c.cfg.BanDuration)
+		})
+	}
+}
+
 // renewAllowIPsByHost re-resolves every allowed host and replaces the IPs they
 // currently map to.
-func (c *Controller) renewAllowIPsByHost(allowedHosts []string) {
+func (c *controller) renewAllowIPsByHost(allowedHosts []string) {
 	slog.Info("renewing IPs by hosts")
 
 	var newIPs []netip.Addr
@@ -60,7 +85,7 @@ func (c *Controller) renewAllowIPsByHost(allowedHosts []string) {
 	c.state.allowIPsByHost = newIPs
 }
 
-func (c *Controller) cleanupBasicAuthIPs(expireInterval time.Duration) {
+func (c *controller) cleanupBasicAuthIPs(expireInterval time.Duration) {
 	slog.Debug("cleanup allowed Basic Auth IPs", "expire interval", expireInterval.String())
 
 	c.state.mu.Lock()
@@ -80,7 +105,7 @@ func (c *Controller) cleanupBasicAuthIPs(expireInterval time.Duration) {
 }
 
 // cleanupFailedAttempts drops bans and failed login attempts older than banDuration.
-func (c *Controller) cleanupFailedAttempts(banDuration time.Duration) {
+func (c *controller) cleanupFailedAttempts(banDuration time.Duration) {
 	slog.Debug("cleanup bans and failed logins", "ban duration", banDuration.String())
 
 	c.state.mu.Lock()
@@ -100,7 +125,7 @@ func (c *Controller) cleanupFailedAttempts(banDuration time.Duration) {
 	})
 }
 
-func (c *Controller) hostToIP(host string) ([]netip.Addr, error) {
+func (c *controller) hostToIP(host string) ([]netip.Addr, error) {
 	ips, err := net.LookupIP(host)
 	if err != nil {
 		return nil, err

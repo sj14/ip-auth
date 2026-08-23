@@ -1,4 +1,4 @@
-package main
+package ipauth
 
 import (
 	"net/netip"
@@ -30,7 +30,7 @@ func TestControllerCleanupBasicAuthIPs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := &Controller{
+			c := &controller{
 				state: state{
 					allowIPsByBasicAuth: map[netip.Addr]time.Time{ip: tt.allowedAt},
 				},

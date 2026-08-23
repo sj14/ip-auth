@@ -1,4 +1,4 @@
-package main
+package ipauth
 
 import (
 	"crypto/subtle"
@@ -9,22 +9,17 @@ import (
 	"time"
 )
 
-type BasicAuthCredentials struct {
-	Name     string
-	Password string
-}
-
-// BasicAuth verifies the request credentials and records a failed attempt when
+// basicAuth verifies the request credentials and records a failed attempt when
 // they don't match. Callers must reject already-banned IPs via evaluate first;
-// the ban rule lives there so HandleIP and Status can't disagree about it.
-func (c *Controller) BasicAuth(requestIP netip.Addr, r *http.Request) error {
+// the ban rule lives there so handleIP and status can't disagree about it.
+func (c *controller) basicAuth(requestIP netip.Addr, r *http.Request) error {
 	givenUser, givenPass, _ := r.BasicAuth()
 
-	if len(c.cfg.allowedUsers) == 0 {
+	if len(c.cfg.Users) == 0 {
 		return fmt.Errorf("basic auth disabled (no users specified)")
 	}
 
-	for _, user := range c.cfg.allowedUsers {
+	for _, user := range c.cfg.Users {
 		userMatch := subtle.ConstantTimeCompare([]byte(givenUser), []byte(user.Name)) == 1
 		passMatch := subtle.ConstantTimeCompare([]byte(givenPass), []byte(user.Password)) == 1
 		if userMatch && passMatch {
@@ -39,7 +34,7 @@ func (c *Controller) BasicAuth(requestIP netip.Addr, r *http.Request) error {
 	// concurrent request from the same IP can ban it in between) to make sure an
 	// already-banned IP never has its attempts or bannedAt touched again, and
 	// thus never has its ban extended.
-	if c.cfg.maxAttempts <= 0 || banInfo.attempts < c.cfg.maxAttempts {
+	if c.cfg.MaxAttempts <= 0 || banInfo.attempts < c.cfg.MaxAttempts {
 		banInfo.attempts += 1
 		// Track the time of the latest pre-ban attempt so cleanupFailedAttempts
 		// can also expire stale, not-yet-banned entries.

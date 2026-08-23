@@ -1,4 +1,4 @@
-package main
+package ipauth
 
 import (
 	"net/netip"
@@ -14,21 +14,21 @@ func TestControllerEvaluate(t *testing.T) {
 
 	tests := []struct {
 		name             string
-		controller       *Controller
+		controller       *controller
 		addr             netip.Addr
 		wantVerdict      verdict
 		wantReasonPrefix string
 	}{
 		{
 			name:             "unknown IP falls through to Basic Auth",
-			controller:       &Controller{cfg: config{maxAttempts: 10}},
+			controller:       &controller{cfg: Config{MaxAttempts: 10}},
 			addr:             ip,
 			wantVerdict:      verdictChallenge,
 			wantReasonPrefix: "denied",
 		},
 		{
 			name:             "private IP denied",
-			controller:       &Controller{cfg: config{denyPrivateIPs: true}},
+			controller:       &controller{cfg: Config{DenyPrivateIPs: true}},
 			addr:             ip,
 			wantVerdict:      verdictDenied,
 			wantReasonPrefix: "denied (private IP)",
@@ -36,7 +36,7 @@ func TestControllerEvaluate(t *testing.T) {
 		{
 			// Regression: deny-private must cover loopback, not just IsPrivate().
 			name:             "loopback denied as private",
-			controller:       &Controller{cfg: config{denyPrivateIPs: true}},
+			controller:       &controller{cfg: Config{DenyPrivateIPs: true}},
 			addr:             netip.MustParseAddr("127.0.0.1"),
 			wantVerdict:      verdictDenied,
 			wantReasonPrefix: "denied (private IP)",
@@ -44,28 +44,28 @@ func TestControllerEvaluate(t *testing.T) {
 		{
 			// Regression: link-local must be covered too.
 			name:             "link-local denied as private",
-			controller:       &Controller{cfg: config{denyPrivateIPs: true}},
+			controller:       &controller{cfg: Config{DenyPrivateIPs: true}},
 			addr:             netip.MustParseAddr("169.254.1.1"),
 			wantVerdict:      verdictDenied,
 			wantReasonPrefix: "denied (private IP)",
 		},
 		{
 			name:             "public IP allowed through deny-private",
-			controller:       &Controller{cfg: config{denyPrivateIPs: true, maxAttempts: 10}},
+			controller:       &controller{cfg: Config{DenyPrivateIPs: true, MaxAttempts: 10}},
 			addr:             netip.MustParseAddr("203.0.113.7"),
 			wantVerdict:      verdictChallenge,
 			wantReasonPrefix: "denied",
 		},
 		{
 			name:             "deny CIDR",
-			controller:       &Controller{cfg: config{denyCIDR: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}}},
+			controller:       &controller{cfg: Config{DenyCIDR: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}}},
 			addr:             ip,
 			wantVerdict:      verdictDenied,
 			wantReasonPrefix: "denied CIDR (10.0.0.0/8)",
 		},
 		{
 			name:             "allow CIDR",
-			controller:       &Controller{cfg: config{allowCIDRFix: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}}},
+			controller:       &controller{cfg: Config{AllowCIDR: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}}},
 			addr:             ip,
 			wantVerdict:      verdictAllowed,
 			wantReasonPrefix: "allowed CIDR (10.0.0.0/8)",
@@ -73,9 +73,9 @@ func TestControllerEvaluate(t *testing.T) {
 		{
 			// Regression: deny must win over allow, and Status must agree with HandleIP.
 			name: "deny CIDR wins over allow CIDR",
-			controller: &Controller{cfg: config{
-				denyCIDR:     []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
-				allowCIDRFix: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
+			controller: &controller{cfg: Config{
+				DenyCIDR:  []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
+				AllowCIDR: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")},
 			}},
 			addr:             ip,
 			wantVerdict:      verdictDenied,
@@ -83,22 +83,22 @@ func TestControllerEvaluate(t *testing.T) {
 		},
 		{
 			name:             "allowed by host",
-			controller:       &Controller{state: state{allowIPsByHost: []netip.Addr{ip}}},
+			controller:       &controller{state: state{allowIPsByHost: []netip.Addr{ip}}},
 			addr:             ip,
 			wantVerdict:      verdictAllowed,
 			wantReasonPrefix: "allowed IP by host",
 		},
 		{
 			name:             "allowed by Basic Auth",
-			controller:       &Controller{state: state{allowIPsByBasicAuth: map[netip.Addr]time.Time{ip: authTime}}},
+			controller:       &controller{state: state{allowIPsByBasicAuth: map[netip.Addr]time.Time{ip: authTime}}},
 			addr:             ip,
 			wantVerdict:      verdictAllowed,
 			wantReasonPrefix: "allowed IP by Basic Auth at",
 		},
 		{
 			name: "banned IP denied",
-			controller: &Controller{
-				cfg:   config{maxAttempts: 10},
+			controller: &controller{
+				cfg:   Config{MaxAttempts: 10},
 				state: state{bannedIPs: map[netip.Addr]banInfo{ip: {attempts: 10, bannedAt: banTime}}},
 			},
 			addr:             ip,
@@ -107,8 +107,8 @@ func TestControllerEvaluate(t *testing.T) {
 		},
 		{
 			name: "attempts below threshold still challenges",
-			controller: &Controller{
-				cfg:   config{maxAttempts: 10},
+			controller: &controller{
+				cfg:   Config{MaxAttempts: 10},
 				state: state{bannedIPs: map[netip.Addr]banInfo{ip: {attempts: 9, bannedAt: banTime}}},
 			},
 			addr:             ip,
@@ -119,8 +119,8 @@ func TestControllerEvaluate(t *testing.T) {
 			// Regression: max-attempts=0 disables banning, so a recorded
 			// attempt must not read as banned.
 			name: "banning disabled reports not banned",
-			controller: &Controller{
-				cfg:   config{maxAttempts: 0},
+			controller: &controller{
+				cfg:   Config{MaxAttempts: 0},
 				state: state{bannedIPs: map[netip.Addr]banInfo{ip: {attempts: 99, bannedAt: banTime}}},
 			},
 			addr:             ip,
@@ -131,8 +131,8 @@ func TestControllerEvaluate(t *testing.T) {
 			// An allow list wins over a ban record: HandleIP returns before
 			// ever reaching the Basic Auth challenge.
 			name: "allow list beats ban record",
-			controller: &Controller{
-				cfg: config{maxAttempts: 10},
+			controller: &controller{
+				cfg: Config{MaxAttempts: 10},
 				state: state{
 					bannedIPs:      map[netip.Addr]banInfo{ip: {attempts: 99, bannedAt: banTime}},
 					allowIPsByHost: []netip.Addr{ip},

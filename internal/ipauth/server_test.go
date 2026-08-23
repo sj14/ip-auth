@@ -1,4 +1,4 @@
-package main
+package ipauth
 
 import (
 	"net/http"
@@ -90,7 +90,7 @@ func TestControllerReadUserIP(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := &Controller{cfg: config{trustedIPHeader: tt.header}}
+			c := &controller{cfg: Config{TrustedIPHeader: tt.header}}
 
 			r := httptest.NewRequest(http.MethodGet, "/", nil)
 			r.RemoteAddr = tt.remoteAddr
@@ -98,7 +98,7 @@ func TestControllerReadUserIP(t *testing.T) {
 				r.Header.Add(tt.header, v)
 			}
 
-			got, err := c.ReadUserIP(r)
+			got, err := c.readUserIP(r)
 
 			if tt.wantErr {
 				if err == nil {
@@ -135,20 +135,20 @@ func TestNewProxy(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			proxy, err := NewProxy(tt.target)
+			proxy, err := newProxy(tt.target)
 
 			if tt.wantErr {
 				if err == nil {
-					t.Fatalf("NewProxy(%q) = nil error, want an error", tt.target)
+					t.Fatalf("newProxy(%q) = nil error, want an error", tt.target)
 				}
 				return
 			}
 
 			if err != nil {
-				t.Fatalf("NewProxy(%q) returned unexpected error: %v", tt.target, err)
+				t.Fatalf("newProxy(%q) returned unexpected error: %v", tt.target, err)
 			}
 			if proxy == nil {
-				t.Fatalf("NewProxy(%q) returned a nil proxy", tt.target)
+				t.Fatalf("newProxy(%q) returned a nil proxy", tt.target)
 			}
 		})
 	}

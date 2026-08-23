@@ -5,13 +5,54 @@ import (
 	"flag"
 	"log"
 	"log/slog"
-	"net/http"
-	"net/netip"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
+
+	"github.com/sj14/ip-auth/internal/ipauth"
 )
+
+func lookupEnvString(key string, defaultVal string) string {
+	if val, ok := os.LookupEnv(key); ok {
+		return val
+	}
+	return defaultVal
+}
+
+func lookupEnvBool(key string, defaultVal bool) bool {
+	if val, ok := os.LookupEnv(key); ok {
+		parsed, err := strconv.ParseBool(val)
+		if err != nil {
+			log.Fatalf("failed parsing %q as bool (%q): %v", val, key, err)
+		}
+		return parsed
+	}
+	return defaultVal
+}
+
+func lookupEnvUint(key string, defaultVal uint64) uint64 {
+	if val, ok := os.LookupEnv(key); ok {
+		parsed, err := strconv.ParseUint(val, 10, 64)
+		if err != nil {
+			log.Fatalf("failed parsing %q as uint (%q): %v", val, key, err)
+		}
+		return parsed
+	}
+	return defaultVal
+}
+
+func lookupEnvDuration(key string, defaultVal time.Duration) time.Duration {
+	if val, ok := os.LookupEnv(key); ok {
+		duration, err := time.ParseDuration(val)
+		if err != nil {
+			log.Fatalf("failed parsing %q as duration (%q): %v", val, key, err)
+		}
+		return duration
+	}
+	return defaultVal
+}
 
 func main() {
 	var (
@@ -34,80 +75,50 @@ func main() {
 	flag.Parse()
 
 	var level slog.Level
-	err := level.UnmarshalText([]byte(*verbosity))
-	if err != nil {
-		log.Fatalf("failed parsing log level: %s\n", err)
+	if err := level.UnmarshalText([]byte(*verbosity)); err != nil {
+		log.Fatalf("failed parsing log level: %v", err)
 	}
 
 	slog.SetLogLoggerLevel(level)
 
-	allowedUsers, err := parseUsers(*usersFlag)
+	users, err := ipauth.ParseUsers(*usersFlag)
 	if err != nil {
 		log.Fatalf("failed parsing -users: %v", err)
 	}
 
-	allowCIDR, err := parsePrefixes(*allowCIDRFlag)
+	allowCIDR, err := ipauth.ParsePrefixes(*allowCIDRFlag)
 	if err != nil {
 		log.Fatalf("failed parsing -allow-cidr: %v", err)
 	}
 
-	denyCIDR, err := parsePrefixes(*denyCIDRFlag)
+	denyCIDR, err := ipauth.ParsePrefixes(*denyCIDRFlag)
 	if err != nil {
 		log.Fatalf("failed parsing -deny-cidr: %v", err)
 	}
 
-	cfg := config{
-		maxAttempts:     *maxAttempts,
-		denyPrivateIPs:  *denyPrivateIPs,
-		trustedIPHeader: *trustedIPHeader,
-		allowedUsers:    allowedUsers,
-		allowCIDRFix:    allowCIDR,
-		denyCIDR:        denyCIDR,
-	}
-
-	c := Controller{
-		cfg: cfg,
-		state: state{
-			bannedIPs:           make(map[netip.Addr]banInfo),
-			allowIPsByBasicAuth: make(map[netip.Addr]time.Time),
-		},
+	cfg := ipauth.Config{
+		Listen:            *listen,
+		Network:           *network,
+		Target:            *target,
+		StatusPath:        *statusPath,
+		Users:             users,
+		AllowCIDR:         allowCIDR,
+		DenyCIDR:          denyCIDR,
+		AllowHosts:        ipauth.SplitList(*allowHostsFlag),
+		DenyPrivateIPs:    *denyPrivateIPs,
+		TrustedIPHeader:   *trustedIPHeader,
+		MaxAttempts:       *maxAttempts,
+		BanDuration:       *banDuration,
+		HostIPRenewal:     *cleanupHostIPsInterval,
+		BasicAuthDuration: *cleanupBasicAuthIPsInterval,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Add dynamic IPs and renew frequently
-	allowedHosts := splitList(*allowHostsFlag)
-	if len(allowedHosts) > 0 {
-		go every(ctx, *cleanupHostIPsInterval, func() {
-			c.renewAllowIPsByHost(allowedHosts)
-		})
+	if err := ipauth.Run(ctx, cfg); err != nil {
+		log.Fatalf("ip-auth: %v", err)
 	}
-
-	// Cleanup expired Basic Auth IPs
-	if *cleanupBasicAuthIPsInterval > 0 {
-		go every(ctx, basicAuthSweepInterval, func() {
-			c.cleanupBasicAuthIPs(*cleanupBasicAuthIPsInterval)
-		})
-	}
-
-	// Cleanup bans
-	if *banDuration > 0 {
-		go every(ctx, banSweepInterval, func() {
-			c.cleanupFailedAttempts(*banDuration)
-		})
-	}
-
-	proxy, err := NewProxy(*target)
-	if err != nil {
-		log.Fatalf("failed setting up the proxy: %v", err)
-	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", c.ProxyRequestHandler(proxy))
-	mux.HandleFunc(*statusPath, c.Status)
-
-	c.listen(ctx, *listen, *network, mux)
 
 	slog.Info("shut down")
 }

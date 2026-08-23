@@ -1,4 +1,4 @@
-package main
+package ipauth
 
 import (
 	"fmt"
@@ -22,9 +22,19 @@ type state struct {
 	allowIPsByBasicAuth map[netip.Addr]time.Time // IP -> time it last authenticated
 }
 
-type Controller struct {
-	cfg   config
+type controller struct {
+	cfg   Config
 	state state
+}
+
+func newController(cfg Config) *controller {
+	return &controller{
+		cfg: cfg,
+		state: state{
+			bannedIPs:           make(map[netip.Addr]banInfo),
+			allowIPsByBasicAuth: make(map[netip.Addr]time.Time),
+		},
+	}
 }
 
 type verdict int
@@ -46,21 +56,20 @@ type decision struct {
 // evaluate applies the allow/deny rules in priority order and is the single
 // source of truth for that ordering: deny rules win over allow rules, and an
 // IP on any allow list is let through regardless of its ban record.
-// HandleIP and Status must both go through here so they can never disagree.
-func (c *Controller) evaluate(ip netip.Addr) decision {
-	// These fields are only written during startup, before any handler runs,
-	// so they need no lock.
-	if c.cfg.denyPrivateIPs && isPrivateAddr(ip) {
+// handleIP and status must both go through here so they can never disagree.
+func (c *controller) evaluate(ip netip.Addr) decision {
+	// Config is never mutated once the server is running, so it needs no lock.
+	if c.cfg.DenyPrivateIPs && isPrivateAddr(ip) {
 		return decision{verdictDenied, "denied (private IP)"}
 	}
 
-	for _, cidr := range c.cfg.denyCIDR {
+	for _, cidr := range c.cfg.DenyCIDR {
 		if cidr.Contains(ip) {
 			return decision{verdictDenied, fmt.Sprintf("denied CIDR (%s)", cidr.String())}
 		}
 	}
 
-	for _, cidr := range c.cfg.allowCIDRFix {
+	for _, cidr := range c.cfg.AllowCIDR {
 		if cidr.Contains(ip) {
 			return decision{verdictAllowed, fmt.Sprintf("allowed CIDR (%s)", cidr.String())}
 		}
@@ -77,7 +86,7 @@ func (c *Controller) evaluate(ip netip.Addr) decision {
 		return decision{verdictAllowed, fmt.Sprintf("allowed IP by Basic Auth at %s", allowedAt)}
 	}
 
-	if info, ok := c.state.bannedIPs[ip]; ok && c.cfg.maxAttempts > 0 && info.attempts >= c.cfg.maxAttempts {
+	if info, ok := c.state.bannedIPs[ip]; ok && c.cfg.MaxAttempts > 0 && info.attempts >= c.cfg.MaxAttempts {
 		return decision{verdictDenied, fmt.Sprintf("banned at %s", info.bannedAt)}
 	}
 
