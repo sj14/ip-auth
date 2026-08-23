@@ -365,7 +365,7 @@ type BasicAuthCredentials struct {
 // BasicAuth verifies the request credentials and records a failed attempt when
 // they don't match. Callers must reject already-banned IPs via evaluate first;
 // the ban rule lives there so HandleIP and Status can't disagree about it.
-func (c *Controller) BasicAuth(requestIP netip.Addr, w http.ResponseWriter, r *http.Request) error {
+func (c *Controller) BasicAuth(requestIP netip.Addr, r *http.Request) error {
 	givenUser, givenPass, _ := r.BasicAuth()
 
 	if len(c.cfg.allowedUsers) == 0 {
@@ -407,13 +407,6 @@ func (c *Controller) BasicAuth(requestIP netip.Addr, w http.ResponseWriter, r *h
 	}()
 
 	return fmt.Errorf("failed basic auth (user=%s addr=%s attempts=%d)", givenUser, requestIP, banInfo.attempts)
-}
-
-func (c *Controller) HandleIPWrapper(w http.ResponseWriter, r *http.Request) {
-	err := c.HandleIP(w, r)
-	if err != nil {
-		slog.Error("failed handling ip", "error", err)
-	}
 }
 
 func (c *Controller) ReadUserIP(r *http.Request) (netip.Addr, error) {
@@ -516,7 +509,7 @@ func (c *Controller) HandleIP(w http.ResponseWriter, r *http.Request) (err error
 
 	slog.Debug("not in allow list", "addr", requestIP)
 
-	err = c.BasicAuth(requestIP, w, r)
+	err = c.BasicAuth(requestIP, r)
 	if err != nil {
 		return err
 	}
