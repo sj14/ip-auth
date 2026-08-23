@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"flag"
 	"fmt"
@@ -359,7 +360,9 @@ func (c *Controller) BasicAuth(requestIP netip.Addr, w http.ResponseWriter, r *h
 	}
 
 	for _, user := range c.allowedUsers {
-		if givenUser == user.Name && givenPass == user.Password {
+		userMatch := subtle.ConstantTimeCompare([]byte(givenUser), []byte(user.Name)) == 1
+		passMatch := subtle.ConstantTimeCompare([]byte(givenPass), []byte(user.Password)) == 1
+		if userMatch && passMatch {
 			slog.Info("success basic auth (address dynamically added)", "addr", requestIP.String(), "user", user.Name)
 			return nil
 		}
