@@ -90,7 +90,7 @@ func TestControllerEvaluate(t *testing.T) {
 		},
 		{
 			name:             "allowed by Basic Auth",
-			controller:       &Controller{state: state{allowIPsByBasicAuth: []basicAuthIP{{ip: ip, allowedAt: authTime}}}},
+			controller:       &Controller{state: state{allowIPsByBasicAuth: map[netip.Addr]time.Time{ip: authTime}}},
 			addr:             ip,
 			wantVerdict:      verdictAllowed,
 			wantReasonPrefix: "allowed IP by Basic Auth at",
@@ -189,7 +189,7 @@ func TestControllerCleanupBasicAuthIPs(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			c := &Controller{
 				state: state{
-					allowIPsByBasicAuth: []basicAuthIP{{ip: ip, allowedAt: tt.allowedAt}},
+					allowIPsByBasicAuth: map[netip.Addr]time.Time{ip: tt.allowedAt},
 				},
 			}
 

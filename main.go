@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -70,11 +71,6 @@ type banInfo struct {
 	bannedAt time.Time
 }
 
-type basicAuthIP struct {
-	ip        netip.Addr
-	allowedAt time.Time
-}
-
 // config holds the settings parsed at startup. Nothing mutates it once the
 // server is running, so it can be read without synchronization.
 type config struct {
@@ -92,7 +88,7 @@ type state struct {
 	mu                  sync.RWMutex
 	bannedIPs           map[netip.Addr]banInfo
 	allowIPsByHost      []netip.Addr
-	allowIPsByBasicAuth []basicAuthIP
+	allowIPsByBasicAuth map[netip.Addr]time.Time // IP -> time it last authenticated
 }
 
 type Controller struct {
@@ -162,8 +158,11 @@ func main() {
 	}
 
 	c := Controller{
-		cfg:   cfg,
-		state: state{bannedIPs: make(map[netip.Addr]banInfo)},
+		cfg: cfg,
+		state: state{
+			bannedIPs:           make(map[netip.Addr]banInfo),
+			allowIPsByBasicAuth: make(map[netip.Addr]time.Time),
+		},
 	}
 
 	// Add dynamic IPs and renew frequently
@@ -274,23 +273,20 @@ func (c *Controller) generateAllowIPsByHost(resetInterval time.Duration, allowed
 func (c *Controller) cleanupBasicAuthIPs(expireInterval time.Duration) {
 	slog.Debug("cleanup allowed Basic Auth IPs", "expire interval", expireInterval.String())
 
-	var newIPs []basicAuthIP
-
 	c.state.mu.Lock()
-	for _, ipInfo := range c.state.allowIPsByBasicAuth {
-		if ipInfo.allowedAt.Add(expireInterval).After(time.Now()) {
-			// not yet expired
-			newIPs = append(newIPs, ipInfo)
-		} else {
-			slog.Debug("expired Basic Auth IP",
-				"ip", ipInfo.ip.String(),
-				"allowed_at", ipInfo.allowedAt,
-			)
-		}
-	}
+	defer c.state.mu.Unlock()
 
-	c.state.allowIPsByBasicAuth = newIPs
-	c.state.mu.Unlock()
+	maps.DeleteFunc(c.state.allowIPsByBasicAuth, func(ip netip.Addr, allowedAt time.Time) bool {
+		if allowedAt.Add(expireInterval).After(time.Now()) {
+			// not yet expired
+			return false
+		}
+		slog.Debug("expired Basic Auth IP",
+			"ip", ip.String(),
+			"allowed_at", allowedAt,
+		)
+		return true
+	})
 }
 
 // Cleanup bans and failed login attempts.
@@ -484,10 +480,8 @@ func (c *Controller) evaluate(ip netip.Addr) decision {
 		return decision{verdictAllowed, "allowed IP by host"}
 	}
 
-	for _, ipInfo := range c.state.allowIPsByBasicAuth {
-		if ipInfo.ip == ip {
-			return decision{verdictAllowed, fmt.Sprintf("allowed IP by Basic Auth at %s", ipInfo.allowedAt)}
-		}
+	if allowedAt, ok := c.state.allowIPsByBasicAuth[ip]; ok {
+		return decision{verdictAllowed, fmt.Sprintf("allowed IP by Basic Auth at %s", allowedAt)}
 	}
 
 	if info, ok := c.state.bannedIPs[ip]; ok && c.cfg.maxAttempts > 0 && info.attempts >= c.cfg.maxAttempts {
@@ -529,7 +523,7 @@ func (c *Controller) HandleIP(w http.ResponseWriter, r *http.Request) (err error
 
 	slog.Debug("allowed by Basic Auth", "addr", requestIP)
 	c.state.mu.Lock()
-	c.state.allowIPsByBasicAuth = append(c.state.allowIPsByBasicAuth, basicAuthIP{ip: requestIP, allowedAt: time.Now()})
+	c.state.allowIPsByBasicAuth[requestIP] = time.Now()
 	delete(c.state.bannedIPs, requestIP)
 	c.state.mu.Unlock()
 	return nil
