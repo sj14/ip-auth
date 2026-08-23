@@ -75,18 +75,29 @@ type basicAuthIP struct {
 	allowedAt time.Time
 }
 
-type Controller struct {
-	mutex               sync.RWMutex // one to rule them all
-	allowedUsers        []BasicAuthCredentials
+// config holds the settings parsed at startup. Nothing mutates it once the
+// server is running, so it can be read without synchronization.
+type config struct {
+	allowedUsers    []BasicAuthCredentials
+	denyCIDR        []netip.Prefix
+	allowCIDRFix    []netip.Prefix
+	denyPrivateIPs  bool
+	trustedIPHeader string
+	maxAttempts     uint64
+}
+
+// state holds everything that changes while the server is running. Every field
+// here is guarded by mu: never read or write one without holding it.
+type state struct {
+	mu                  sync.RWMutex
 	bannedIPs           map[netip.Addr]banInfo
-	denyCIDR            []netip.Prefix
-	allowCIDRFix        []netip.Prefix
 	allowIPsByHost      []netip.Addr
 	allowIPsByBasicAuth []basicAuthIP
-	denyPrivateIPs      bool
-	trustedIPHeader     string
-	maxAttempts         uint64
-	mux                 *http.ServeMux
+}
+
+type Controller struct {
+	cfg   config
+	state state
 }
 
 func main() {
@@ -117,9 +128,8 @@ func main() {
 
 	slog.SetLogLoggerLevel(level)
 
-	c := Controller{
+	cfg := config{
 		maxAttempts:     *maxAttempts,
-		bannedIPs:       make(map[netip.Addr]banInfo),
 		denyPrivateIPs:  *denyPrivateIPs,
 		trustedIPHeader: *trustedIPHeader,
 	}
@@ -134,21 +144,26 @@ func main() {
 			slog.Error("malformed user", "user", namePass)
 			continue
 		}
-		c.allowedUsers = append(c.allowedUsers, BasicAuthCredentials{Name: namePass[0], Password: namePass[1]})
+		cfg.allowedUsers = append(cfg.allowedUsers, BasicAuthCredentials{Name: namePass[0], Password: namePass[1]})
 	}
 
 	allowedIPs := strings.Split(*allowCIDRFlag, ",")
 	if len(allowedIPs) > 0 && allowedIPs[0] != "" {
 		for _, ip := range allowedIPs {
-			c.allowCIDRFix = append(c.allowCIDRFix, netip.MustParsePrefix(ip))
+			cfg.allowCIDRFix = append(cfg.allowCIDRFix, netip.MustParsePrefix(ip))
 		}
 	}
 
 	deniedIPs := strings.Split(*denyCIDRFlag, ",")
 	if len(deniedIPs) > 0 && deniedIPs[0] != "" {
 		for _, ip := range deniedIPs {
-			c.denyCIDR = append(c.denyCIDR, netip.MustParsePrefix(ip))
+			cfg.denyCIDR = append(cfg.denyCIDR, netip.MustParsePrefix(ip))
 		}
+	}
+
+	c := Controller{
+		cfg:   cfg,
+		state: state{bannedIPs: make(map[netip.Addr]banInfo)},
 	}
 
 	// Add dynamic IPs and renew frequently
@@ -181,17 +196,15 @@ func main() {
 	mux.HandleFunc("/", c.ProxyRequestHandler(proxy))
 	mux.HandleFunc(*statusPath, c.Status)
 
-	c.mux = mux
-
-	c.listen(*listen, *network)
+	c.listen(*listen, *network, mux)
 
 	slog.Info("shut down")
 }
 
-func (c *Controller) listen(addr, network string) {
+func (c *Controller) listen(addr, network string, handler http.Handler) {
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: c.mux,
+		Handler: handler,
 	}
 
 	listen, err := net.Listen(network, addr)
@@ -202,10 +215,10 @@ func (c *Controller) listen(addr, network string) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	go func() {
-		c := make(chan os.Signal, 1)
-		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 
-		<-c
+		<-sig
 		cancel()
 	}()
 
@@ -245,9 +258,9 @@ func (c *Controller) generateAllowIPsByHost(resetInterval time.Duration, allowed
 			newIPs = append(newIPs, hostIPs...)
 		}
 
-		c.mutex.Lock()
-		c.allowIPsByHost = newIPs
-		c.mutex.Unlock()
+		c.state.mu.Lock()
+		c.state.allowIPsByHost = newIPs
+		c.state.mu.Unlock()
 
 		if resetInterval <= 0 {
 			// resolve once, renewal disabled
@@ -263,8 +276,8 @@ func (c *Controller) cleanupBasicAuthIPs(expireInterval time.Duration) {
 
 	var newIPs []basicAuthIP
 
-	c.mutex.Lock()
-	for _, ipInfo := range c.allowIPsByBasicAuth {
+	c.state.mu.Lock()
+	for _, ipInfo := range c.state.allowIPsByBasicAuth {
 		if ipInfo.allowedAt.Add(expireInterval).After(time.Now()) {
 			// not yet expired
 			newIPs = append(newIPs, ipInfo)
@@ -276,8 +289,8 @@ func (c *Controller) cleanupBasicAuthIPs(expireInterval time.Duration) {
 		}
 	}
 
-	c.allowIPsByBasicAuth = newIPs
-	c.mutex.Unlock()
+	c.state.allowIPsByBasicAuth = newIPs
+	c.state.mu.Unlock()
 }
 
 // Cleanup bans and failed login attempts.
@@ -289,16 +302,16 @@ func (c *Controller) cleanupFailedAttempts(banDuration time.Duration) {
 
 		remainingBans := make(map[netip.Addr]banInfo)
 
-		c.mutex.Lock()
-		for ip, info := range c.bannedIPs {
+		c.state.mu.Lock()
+		for ip, info := range c.state.bannedIPs {
 			if info.bannedAt.Add(banDuration).After(time.Now()) {
 				// still banned, or not yet expired
 				remainingBans[ip] = info
 			}
 		}
 
-		c.bannedIPs = remainingBans
-		c.mutex.Unlock()
+		c.state.bannedIPs = remainingBans
+		c.state.mu.Unlock()
 	}
 }
 
@@ -359,11 +372,11 @@ type BasicAuthCredentials struct {
 func (c *Controller) BasicAuth(requestIP netip.Addr, w http.ResponseWriter, r *http.Request) error {
 	givenUser, givenPass, _ := r.BasicAuth()
 
-	if len(c.allowedUsers) == 0 {
+	if len(c.cfg.allowedUsers) == 0 {
 		return fmt.Errorf("basic auth disabled (no users specified)")
 	}
 
-	for _, user := range c.allowedUsers {
+	for _, user := range c.cfg.allowedUsers {
 		userMatch := subtle.ConstantTimeCompare([]byte(givenUser), []byte(user.Name)) == 1
 		passMatch := subtle.ConstantTimeCompare([]byte(givenPass), []byte(user.Password)) == 1
 		if userMatch && passMatch {
@@ -372,20 +385,20 @@ func (c *Controller) BasicAuth(requestIP netip.Addr, w http.ResponseWriter, r *h
 		}
 	}
 
-	c.mutex.Lock()
-	banInfo := c.bannedIPs[requestIP]
+	c.state.mu.Lock()
+	banInfo := c.state.bannedIPs[requestIP]
 	// Re-check under the lock (evaluate's check happens outside it, so a
 	// concurrent request from the same IP can ban it in between) to make sure an
 	// already-banned IP never has its attempts or bannedAt touched again, and
 	// thus never has its ban extended.
-	if c.maxAttempts <= 0 || banInfo.attempts < c.maxAttempts {
+	if c.cfg.maxAttempts <= 0 || banInfo.attempts < c.cfg.maxAttempts {
 		banInfo.attempts += 1
 		// Track the time of the latest pre-ban attempt so cleanupFailedAttempts
 		// can also expire stale, not-yet-banned entries.
 		banInfo.bannedAt = time.Now()
-		c.bannedIPs[requestIP] = banInfo
+		c.state.bannedIPs[requestIP] = banInfo
 	}
-	c.mutex.Unlock()
+	c.state.mu.Unlock()
 
 	// login failed, add a tarpit
 	defer func() {
@@ -408,9 +421,9 @@ func (c *Controller) HandleIPWrapper(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Controller) ReadUserIP(r *http.Request) (netip.Addr, error) {
-	if c.trustedIPHeader != "" {
-		if ip := r.Header.Get(c.trustedIPHeader); ip != "" {
-			slog.Debug("IP from header", "header", c.trustedIPHeader, "addr", ip)
+	if c.cfg.trustedIPHeader != "" {
+		if ip := r.Header.Get(c.cfg.trustedIPHeader); ip != "" {
+			slog.Debug("IP from header", "header", c.cfg.trustedIPHeader, "addr", ip)
 			return netip.ParseAddr(ip)
 		}
 	}
@@ -448,36 +461,36 @@ type decision struct {
 func (c *Controller) evaluate(ip netip.Addr) decision {
 	// These fields are only written during startup, before any handler runs,
 	// so they need no lock.
-	if c.denyPrivateIPs && isPrivateAddr(ip) {
+	if c.cfg.denyPrivateIPs && isPrivateAddr(ip) {
 		return decision{verdictDenied, "denied (private IP)"}
 	}
 
-	for _, cidr := range c.denyCIDR {
+	for _, cidr := range c.cfg.denyCIDR {
 		if cidr.Contains(ip) {
 			return decision{verdictDenied, fmt.Sprintf("denied CIDR (%s)", cidr.String())}
 		}
 	}
 
-	for _, cidr := range c.allowCIDRFix {
+	for _, cidr := range c.cfg.allowCIDRFix {
 		if cidr.Contains(ip) {
 			return decision{verdictAllowed, fmt.Sprintf("allowed CIDR (%s)", cidr.String())}
 		}
 	}
 
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
+	c.state.mu.RLock()
+	defer c.state.mu.RUnlock()
 
-	if slices.Contains(c.allowIPsByHost, ip) {
+	if slices.Contains(c.state.allowIPsByHost, ip) {
 		return decision{verdictAllowed, "allowed IP by host"}
 	}
 
-	for _, ipInfo := range c.allowIPsByBasicAuth {
+	for _, ipInfo := range c.state.allowIPsByBasicAuth {
 		if ipInfo.ip == ip {
 			return decision{verdictAllowed, fmt.Sprintf("allowed IP by Basic Auth at %s", ipInfo.allowedAt)}
 		}
 	}
 
-	if info, ok := c.bannedIPs[ip]; ok && c.maxAttempts > 0 && info.attempts >= c.maxAttempts {
+	if info, ok := c.state.bannedIPs[ip]; ok && c.cfg.maxAttempts > 0 && info.attempts >= c.cfg.maxAttempts {
 		return decision{verdictDenied, fmt.Sprintf("banned at %s", info.bannedAt)}
 	}
 
@@ -515,10 +528,10 @@ func (c *Controller) HandleIP(w http.ResponseWriter, r *http.Request) (err error
 	}
 
 	slog.Debug("allowed by Basic Auth", "addr", requestIP)
-	c.mutex.Lock()
-	c.allowIPsByBasicAuth = append(c.allowIPsByBasicAuth, basicAuthIP{ip: requestIP, allowedAt: time.Now()})
-	delete(c.bannedIPs, requestIP)
-	c.mutex.Unlock()
+	c.state.mu.Lock()
+	c.state.allowIPsByBasicAuth = append(c.state.allowIPsByBasicAuth, basicAuthIP{ip: requestIP, allowedAt: time.Now()})
+	delete(c.state.bannedIPs, requestIP)
+	c.state.mu.Unlock()
 	return nil
 }
 
