@@ -128,7 +128,7 @@ func main() {
 		if user == "" {
 			continue
 		}
-		namePass := strings.Split(user, ":")
+		namePass := strings.SplitN(user, ":", 2)
 		if len(namePass) != 2 {
 			slog.Error("malformed user", "user", namePass)
 			continue
